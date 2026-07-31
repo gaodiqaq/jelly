@@ -1,0 +1,14 @@
+agent_shell/
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.env
+dist/
+build/
+node_modules/
+*.log
+.DS_Store
+Thumbs.db
