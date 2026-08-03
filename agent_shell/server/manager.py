@@ -114,7 +114,7 @@ class SessionManager:
             entry: dict[str, Any] = {"role": message.role, "content": message.content}
             if message.role == "assistant" and message.tool_calls:
                 entry["tool_calls"] = [
-                    {"name": call.name, "arguments": call.arguments}
+                    {"name": call.name, "arguments": call.arguments, "status": "done"}
                     for call in message.tool_calls
                 ]
             if message.role == "tool":

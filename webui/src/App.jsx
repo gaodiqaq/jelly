@@ -267,9 +267,11 @@ export default function App() {
               <div className="empty-sub">可以让我读写文件、执行命令、搜索网络、管理待办</div>
             </div>
           )}
-          {history.map((m, i) => (
-            <Message key={i} msg={m} />
-          ))}
+          {history
+            .filter((m) => m.role !== 'tool')
+            .map((m, i) => (
+              <Message key={i} msg={m} />
+            ))}
           {pending && <Message msg={pending} />}
           {status && <div className="status">{status}</div>}
         </div>
@@ -369,8 +371,81 @@ function SessionItem({ s, active, onOpen, onRename, onDelete }) {
   )
 }
 
+const TOOL_ICONS = {
+  web_fetch: '🌐',
+  bash: '💻',
+  read: '📖',
+  write: '✏️',
+  edit: '✏️',
+  ls: '📁',
+  glob: '🔍',
+  grep: '🔍',
+  todo_add: '✅',
+  todo_done: '☑️',
+  todo_list: '📋',
+}
+
+function toolSummary(tc) {
+  const args = tc.arguments || {}
+  const s = (v) => (typeof v === 'string' ? v : v == null ? '' : JSON.stringify(v))
+  switch (tc.name) {
+    case 'web_fetch':
+      return s(args.url) || '抓取网页'
+    case 'bash':
+      return `$ ${s(args.command)}`
+    case 'read':
+      return s(args.path) || '读取文件'
+    case 'write':
+      return s(args.path) || '写入文件'
+    case 'edit':
+      return s(args.path) || '修改文件'
+    case 'ls':
+      return s(args.path) || '.'
+    case 'glob':
+    case 'grep':
+      return args.path ? `${s(args.pattern)} @ ${s(args.path)}` : s(args.pattern)
+    case 'todo_add':
+      return s(args.content) || '添加待办'
+    case 'todo_done':
+      return s(args.todo_id) || '完成待办'
+    case 'todo_list':
+      return '查看待办列表'
+    default:
+      return Object.entries(args)
+        .map(([k, v]) => `${k}=${s(v)}`)
+        .join(' ')
+  }
+}
+
 function Message({ msg }) {
   const isUser = msg.role === 'user'
+  const [expanded, setExpanded] = useState(() => new Set())
+  const [userToggled, setUserToggled] = useState(() => new Set())
+  const calls = msg.tool_calls || []
+
+  const isOpen = (i) => {
+    const tc = calls[i]
+    return expanded.has(i) || (tc.status === 'running' && !userToggled.has(i))
+  }
+
+  const allOpen = calls.length > 0 && calls.every((_, i) => isOpen(i))
+
+  const toggle = (i) => {
+    setUserToggled((prev) => new Set(prev).add(i))
+    setExpanded((prev) => {
+      const next = new Set(prev)
+      if (next.has(i)) next.delete(i)
+      else next.add(i)
+      return next
+    })
+  }
+
+  const toggleAll = () => {
+    const all = new Set(calls.map((_, i) => i))
+    setUserToggled(all)
+    setExpanded(allOpen ? new Set() : all)
+  }
+
   return (
     <div className={`msg ${isUser ? 'user' : 'assistant'}`}>
       <div className={`avatar ${isUser ? 'me' : 'ai'}`}>{isUser ? '我' : 'AI'}</div>
@@ -380,21 +455,44 @@ function Message({ msg }) {
             {isUser ? msg.content : <Markdown text={msg.content} />}
           </div>
         )}
-        {msg.tool_calls &&
-          msg.tool_calls.map((tc, i) => (
-            <div key={i} className={`tool-card ${tc.status || ''}`}>
-              <div className="tool-head">
-                <span className="tool-name">🔧 {tc.name}</span>
-                <span className="tool-status">{tc.status || '运行中…'}</span>
-              </div>
-              <pre className="tool-args">
-                {typeof tc.arguments === 'string'
-                  ? tc.arguments
-                  : JSON.stringify(tc.arguments, null, 2)}
-              </pre>
-              {tc.output != null && <pre className="tool-output">{tc.output}</pre>}
-            </div>
-          ))}
+        {calls.length > 0 && (
+          <div className="tool-calls">
+            {calls.length > 1 && (
+              <button className="tool-toggle-all" onClick={toggleAll}>
+                {allOpen ? '收起全部' : '展开全部'}
+              </button>
+            )}
+            {calls.map((tc, i) => {
+              const open = isOpen(i)
+              const done = tc.status == null || tc.status === 'done'
+              const statusText = tc.status === 'error' ? '出错' : done ? '完成' : '运行中'
+              const cardClass = tc.status === 'error' ? 'error' : done ? 'done' : 'running'
+              return (
+                <div key={i} className={`tool-card ${cardClass}`}>
+                  <div className="tool-head" onClick={() => toggle(i)}>
+                    <div className="tool-head-left">
+                      <span className={`tool-arrow ${open ? 'open' : ''}`}>▶</span>
+                      <span className="tool-icon">{TOOL_ICONS[tc.name] || '🔧'}</span>
+                      <span className="tool-name">{tc.name}</span>
+                      <span className="tool-summary">{toolSummary(tc)}</span>
+                    </div>
+                    <span className="tool-status">{statusText}</span>
+                  </div>
+                  <div className={`tool-collapse ${open ? 'open' : ''}`}>
+                    <div className="tool-collapse-inner">
+                      <pre className="tool-args">
+                        {typeof tc.arguments === 'string'
+                          ? tc.arguments
+                          : JSON.stringify(tc.arguments, null, 2)}
+                      </pre>
+                      {tc.output != null && <pre className="tool-output">{tc.output}</pre>}
+                    </div>
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        )}
       </div>
     </div>
   )

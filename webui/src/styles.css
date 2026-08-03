@@ -322,6 +322,26 @@ body {
 .markdown th { background: #f4f5fa; font-weight: 600; }
 
 /* 工具卡片 */
+.tool-calls {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.tool-toggle-all {
+  align-self: flex-end;
+  border: 1px solid #e6e8ef;
+  background: #fafbfd;
+  color: #8a90a0;
+  font-size: 11px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+}
+.tool-toggle-all:hover { color: #5b6cff; border-color: #d0d5ff; }
+
 .tool-card {
   background: #fff;
   border: 1px solid #e6e8ef;
@@ -339,21 +359,66 @@ body {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 8px;
   padding: 7px 12px;
   background: #fafbfd;
-  border-bottom: 1px solid #eef0f5;
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.15s;
+}
+.tool-head:hover { background: #f3f5fb; }
+
+.tool-head-left {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex: 1;
 }
 
-.tool-name { font-weight: 600; color: #3a3f4b; }
-.tool-status { color: #8a90a0; font-size: 11px; }
+.tool-arrow {
+  display: inline-block;
+  font-size: 9px;
+  color: #b4b9c6;
+  flex-shrink: 0;
+  transition: transform 0.2s ease;
+}
+.tool-arrow.open { transform: rotate(90deg); }
+
+.tool-icon { font-size: 13px; flex-shrink: 0; }
+
+.tool-name { font-weight: 600; color: #3a3f4b; flex-shrink: 0; }
+
+.tool-summary {
+  color: #8a90a0;
+  font-family: 'Cascadia Code', Consolas, 'Courier New', monospace;
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.tool-status {
+  color: #8a90a0;
+  font-size: 11px;
+  flex-shrink: 0;
+}
+
+.tool-card.done .tool-status::before,
+.tool-card.error .tool-status::before,
 .tool-card.running .tool-status::before {
   content: '';
   display: inline-block;
   width: 7px;
   height: 7px;
   border-radius: 50%;
-  background: #5b6cff;
   margin-right: 6px;
+}
+.tool-card.done .tool-status::before { background: #46a758; }
+.tool-card.error .tool-status::before { background: #e5484d; }
+.tool-card.running .tool-status::before {
+  background: #5b6cff;
   animation: pulse 1s infinite;
 }
 
@@ -361,6 +426,14 @@ body {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.3; }
 }
+
+.tool-collapse {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 0.25s ease;
+}
+.tool-collapse.open { grid-template-rows: 1fr; }
+.tool-collapse-inner { overflow: hidden; min-height: 0; }
 
 .tool-args, .tool-output {
   margin: 0;
@@ -372,8 +445,13 @@ body {
   font-family: 'Cascadia Code', Consolas, 'Courier New', monospace;
 }
 
-.tool-args { background: #f8f9fc; color: #3f4554; }
-.tool-output { background: #10141c; color: #9fdc8a; font-size: 12.5px; }
+.tool-args { background: #f8f9fc; color: #3f4554; border-top: 1px solid #eef0f5; }
+.tool-output {
+  background: #10141c;
+  color: #9fdc8a;
+  font-size: 12.5px;
+  border-top: 1px solid #10141c;
+}
 
 .status { color: #8a90a0; font-size: 12px; padding: 0 4px; }
 
