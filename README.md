@@ -1,6 +1,6 @@
-# 果冻（原名 agent-shell）
+# 果冻
 
-类似 Claude Code 的本地终端 AI Agent，基于 `litellm` 网关，可对接任意主流大模型（OpenAI / Anthropic / DeepSeek / Gemini / 本地 Ollama 等）。CLI 命令仍为 `agent`。
+AI Agent，基于 `litellm` 网关，可对接任意主流大模型（OpenAI / Anthropic / DeepSeek / Gemini / 本地 Ollama 等），可以在本地终端使用，也可以使用web界面对话。
 
 ## 特性
 
