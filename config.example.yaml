@@ -4,6 +4,17 @@
 
 model: "openai/gpt-4o-mini"        # litellm 格式模型名，必须带提供商前缀
 
+# 运行时配置：存放（或为运行时切换持久化的）提供商 API Key / Base URL
+# 文件默认位于 ~/.agent_shell/config.yaml（也可用 /apikey、/baseurl 命令或 Web /api/config 动态修改，
+# 修改会写回此处并在运行时热生效，无需重启）。二者都不配置时回退到 AGENT_<名>_API_KEY 环境变量。
+# providers:
+#   deepseek:
+#     api_key: "sk-..."
+#     api_base: "https://api.deepseek.com"
+#     default_model: "deepseek/deepseek-chat"   # 可选：该提供商标记默认模型
+#   openai:
+#     api_key: "sk-..."
+
 max_turns: 60                      # 单轮对话中最大工具调用轮次
 
 api:

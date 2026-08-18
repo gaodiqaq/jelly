@@ -4,6 +4,8 @@
 - 将内部 Message 模型转换为 litellm/OpenAI 格式（含 tool_calls 的 JSON 序列化）
 - 流式与非流式两种调用路径（默认流式）
 - 将 litellm 异常映射为结构化 :class:`~agent_shell.errors.LLMError`
+- 运行时凭据解析：注入 :class:`~agent_shell.runtime.ProviderStore` 后，
+  每次请求动态解析 model / api_key / api_base（支持热切换）
 """
 
 from __future__ import annotations
@@ -20,6 +22,7 @@ from litellm import exceptions as litellm_exc
 
 from agent_shell.config import Settings
 from agent_shell.errors import LLMError
+from agent_shell.runtime import ProviderStore
 from agent_shell.types import AssistantMessage, Message, ToolCall, ToolSpec
 
 _DROP_PARAMS = True
@@ -29,14 +32,17 @@ class LLMClient:
     """封装 litellm 的对话补全客户端。
 
     Args:
-        settings: 全局配置（模型名、采样参数、超时）。
+        settings: 全局配置（采样参数、超时、默认模型）。
+        store: 运行时配置存储；提供后每次调用实时解析模型与凭据，
+            未提供时退回默认模型 + 环境变量（``<PREFIX>_API_KEY``）。
 
     Raises:
         LLMError: 构造时无法导入 litellm（依赖缺失）。
     """
 
-    def __init__(self, settings: Settings) -> None:
-        self._model = settings.model
+    def __init__(self, settings: Settings, store: ProviderStore | None = None) -> None:
+        self._fallback_model = settings.model
+        self._store = store
         self._temperature = settings.api.temperature
         self._max_tokens = settings.api.max_tokens
         self._timeout = settings.api.timeout
@@ -44,13 +50,57 @@ class LLMClient:
 
     @property
     def model(self) -> str:
-        """当前模型名。"""
-        return self._model
+        """当前模型名（运行时存储优先）。"""
+        if self._store is not None:
+            return self._store.model
+        return self._fallback_model
 
     @model.setter
     def model(self, value: str) -> None:
-        """切换模型名（运行时 /model 命令使用）。"""
-        self._model = value
+        """切换模型名（运行时命令使用，持久化）。"""
+        if self._store is not None:
+            self._store.set_model(value)
+        else:
+            self._fallback_model = value
+
+    def set_api_key(self, provider: str, api_key: str) -> None:
+        """运行时更新提供商的 API Key。
+
+        Args:
+            provider: 提供商名（如 ``openai``）。
+            api_key: 明文 API Key。
+        """
+        if self._store is not None:
+            self._store.upsert_provider(provider, api_key=api_key)
+
+    def set_api_base(self, provider: str, api_base: str) -> None:
+        """运行时更新提供商的 Base URL。
+
+        Args:
+            provider: 提供商名（如 ``deepseek``）。
+            api_base: Base URL。
+        """
+        if self._store is not None:
+            self._store.upsert_provider(provider, api_base=api_base)
+
+    def _resolve(self, model: str | None = None) -> tuple[str, str | None, str | None]:
+        """解析本次请求使用的模型与凭据。
+
+        Args:
+            model: 指定的模型名；None 使用当前激活模型。
+
+        Returns:
+            ``(model, api_key, api_base)`` 三元组。
+        """
+        if self._store is not None:
+            return self._store.resolve(model)
+        name = model or self._fallback_model
+        prefix = name.split("/", 1)[0].upper()
+        return (
+            name,
+            os.environ.get(f"{prefix}_API_KEY"),
+            os.environ.get(f"{prefix}_API_BASE"),
+        )
 
     def complete(
         self,
@@ -58,6 +108,7 @@ class LLMClient:
         tools: Sequence[ToolSpec] | None = None,
         *,
         stream: bool = True,
+        model: str | None = None,
         on_token: Callable[[str], None] | None = None,
     ) -> AssistantMessage:
         """调用模型补全对话。
@@ -66,6 +117,7 @@ class LLMClient:
             messages: 消息历史（内部模型）。
             tools: 可用的工具声明；None 表示纯对话。
             stream: 是否流式接收。
+            model: 覆盖当前模型（运行时切换/连通性测试用）；None 用当前值。
             on_token: 流式文本回调（每次收到文本增量时调用，用于实时渲染）。
 
         Returns:
@@ -75,14 +127,19 @@ class LLMClient:
             LLMError: API 不可用、认证失败、限流、参数非法、模型不支持等，
                 错误信息为面向用户的中文描述。
         """
+        model_name, api_key, api_base = self._resolve(model)
         litellm_messages = self._to_litellm_messages(messages)
         kwargs: dict[str, Any] = {
-            "model": self._model,
+            "model": model_name,
             "messages": litellm_messages,
             "temperature": self._temperature,
             "max_tokens": self._max_tokens,
             "timeout": self._timeout,
         }
+        if api_key:
+            kwargs["api_key"] = api_key
+        if api_base:
+            kwargs["api_base"] = api_base
         if tools:
             kwargs["tools"] = [spec.to_function_schema() for spec in tools]
             kwargs["tool_choice"] = "auto"

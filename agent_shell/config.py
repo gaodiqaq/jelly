@@ -135,6 +135,7 @@ class Settings:
         context: ContextConfig | None = None,
         session_dir: Path | None = None,
         cwd: Path | None = None,
+        providers: dict[str, dict] | None = None,
     ) -> None:
         self.model = model
         self.max_turns = max_turns
@@ -145,6 +146,7 @@ class Settings:
         self.context = context or ContextConfig()
         self.session_dir = session_dir or Path.home() / ".agent_shell" / "sessions"
         self.cwd = cwd or Path.cwd()
+        self.providers: dict[str, dict] = dict(providers or {})
 
     @property
     def session_dir(self) -> Path:
@@ -291,6 +293,19 @@ def _build_settings(raw: dict, env: dict[str, str], explicit_cwd: Path | None) -
     if cwd is None and env.get("AGENT_CWD"):
         cwd = Path(env["AGENT_CWD"])
 
+    providers_raw = raw.get("providers") or {}
+    if not isinstance(providers_raw, dict):
+        raise ConfigError(f"providers 必须是映射，实际为 {type(providers_raw).__name__}")
+    providers: dict[str, dict] = {}
+    for name, info in providers_raw.items():
+        if not isinstance(name, str) or not isinstance(info, dict):
+            raise ConfigError(f"providers.{name} 必须是映射")
+        providers[name] = {
+            "api_key": info.get("api_key"),
+            "api_base": info.get("api_base"),
+            "default_model": info.get("default_model"),
+        }
+
     settings = Settings(
         model=model,
         max_turns=max_turns,
@@ -301,6 +316,7 @@ def _build_settings(raw: dict, env: dict[str, str], explicit_cwd: Path | None) -
         context=context,
         session_dir=session_dir,
         cwd=cwd,
+        providers=providers,
     )
     if settings.permissions.default == "auto":
         settings.permissions.auto_approve_read_only = True

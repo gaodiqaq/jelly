@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import secrets
 import shutil
 import tempfile
 from dataclasses import dataclass
@@ -198,7 +199,7 @@ class Session:
         Returns:
             新会话实例。
         """
-        session_id = datetime.now().strftime(SESSION_ID_FORMAT)
+        session_id = f"{datetime.now().strftime(SESSION_ID_FORMAT)}-{secrets.token_hex(2)}"
         existing = {meta.session_id for meta in cls.list_sessions(session_dir)}
         if session_id in existing:
             session_id = f"{session_id}-{len(existing)}"

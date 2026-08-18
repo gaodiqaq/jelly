@@ -26,6 +26,7 @@ from agent_shell.core.executor import ToolExecutor
 from agent_shell.errors import ConfigError, SessionError
 from agent_shell.llm.client import LLMClient
 from agent_shell.llm.prompts import build_system_prompt
+from agent_shell.runtime import ProviderStore, mask_key
 from agent_shell.tools import TodoStore, build_registry
 from agent_shell.ui.console import _error_tolerant, create_console
 from agent_shell.ui.prompt import ask_permission, print_help, read_input
@@ -53,6 +54,7 @@ def _build_agent(
     single_shot: bool,
     stream: bool,
     session: Session | None = None,
+    store: ProviderStore | None = None,
 ) -> Agent:
     """装配 Agent 及其全部依赖组件。
 
@@ -63,10 +65,14 @@ def _build_agent(
         single_shot: 单次任务模式。
         stream: 流式输出。
         session: 待恢复的会话；None 时创建新会话。
+        store: 运行时配置存储；None 时基于 settings 创建（不立即写盘）。
 
     Returns:
         装配完成的 Agent。
     """
+    if store is None:
+        store = ProviderStore()
+        store.seed_from_settings(settings)
     todo = TodoStore()
     registry = build_registry(
         cwd=settings.cwd,
@@ -75,12 +81,15 @@ def _build_agent(
         disabled=settings.tools.disabled,
         todo=todo,
     )
-    llm = LLMClient(settings)
+    llm = LLMClient(settings, store)
+    session_model = store.model
     if session is None:
-        system_prompt = settings.system_prompt or build_system_prompt(settings.cwd, settings.model)
+        system_prompt = settings.system_prompt or build_system_prompt(
+            settings.cwd, session_model
+        )
         session = Session.create(
             settings.session_dir,
-            settings.model,
+            session_model,
             settings.cwd,
             system_prompt=system_prompt,
         )
@@ -192,6 +201,9 @@ def run(
     console = create_console()
     renderer = Renderer(console)
 
+    store = ProviderStore()
+    store.seed_from_settings(settings)
+
     session: Session | None = None
     if session_id is not None:
         try:
@@ -208,12 +220,13 @@ def run(
         single_shot=prompt is not None,
         stream=not no_stream,
         session=session,
+        store=store,
     )
-    renderer.header(settings.model, str(settings.cwd), __version__)
+    renderer.header(store.model, str(settings.cwd), __version__)
     if prompt is not None:
         _run_once(agent, renderer, console, prompt)
         return
-    _repl(agent, renderer, console, settings)
+    _repl(agent, renderer, console, settings, store)
 
 
 def _run_once(agent: Agent, renderer: Renderer, console: Console, prompt: str) -> None:
@@ -240,6 +253,7 @@ def _repl(
     renderer: Renderer,
     console: Console,
     settings: Settings,
+    store: ProviderStore,
 ) -> None:
     """交互式 REPL 主循环。
 
@@ -248,6 +262,7 @@ def _repl(
         renderer: 渲染器。
         console: 控制台。
         settings: 全局配置。
+        store: 运行时配置存储。
     """
     renderer.info("输入 /help 查看命令，Ctrl+C 中断当前任务，/exit 退出")
     while True:
@@ -258,7 +273,7 @@ def _repl(
             renderer.info("再见！")
             raise typer.Exit(code=0) from None
         if text.startswith("/"):
-            _handle_command(text, agent, renderer, console, settings)
+            _handle_command(text, agent, renderer, console, settings, store)
             continue
         try:
             agent.run(text)
@@ -274,6 +289,7 @@ def _handle_command(
     renderer: Renderer,
     console: Console,
     settings: Settings,
+    store: ProviderStore,
 ) -> None:
     """处理以 / 开头的内部命令。
 
@@ -282,13 +298,14 @@ def _handle_command(
         renderer: 渲染器。
         console: 控制台。
         settings: 全局配置。
+        store: 运行时配置存储。
 
     Raises:
         typer.Exit: 用户请求退出（/exit、/quit）。
     """
     parts = text.split(maxsplit=1)
     command = parts[0].lower()
-    argument = parts[1] if len(parts) > 1 else ""
+    argument = parts[1].strip() if len(parts) > 1 else ""
 
     if command in ("/exit", "/quit"):
         raise typer.Exit(code=0)
@@ -310,11 +327,19 @@ def _handle_command(
         renderer.info("会话已清空")
     elif command == "/model":
         if not argument:
-            renderer.info(f"当前模型: {settings.model}")
+            renderer.info(f"当前模型: {store.model}（/model <模型名> 可切换并持久化）")
         else:
             agent.llm.model = argument
-            settings.model = argument
-            renderer.info(f"模型已切换为 {argument}")
+            settings.model = store.model
+            renderer.info(f"模型已切换为 {store.model}")
+    elif command == "/apikey":
+        _handle_apikey(argument, renderer, agent)
+    elif command == "/baseurl":
+        _handle_baseurl(argument, renderer, agent)
+    elif command == "/providers":
+        _show_providers(renderer, store)
+    elif command == "/config":
+        _show_config(renderer, store, settings)
     elif command == "/auto":
         agent.executor.enable_auto()
         renderer.info("已切换为自动审批模式")
@@ -329,6 +354,98 @@ def _handle_command(
         renderer.info(f"可用工具: {names}")
     else:
         console.print(f"[red]未知命令: {command}[/red]（/help 查看帮助）")
+
+
+def _handle_apikey(argument: str, renderer: Renderer, agent: Agent) -> None:
+    """处理 /apikey 命令：设置提供商 API Key。
+
+    Args:
+        argument: ``<提供商> <Key>`` 或 ``<提供商>``（查看当前掩码）。
+        renderer: 渲染器。
+        agent: Agent 实例。
+    """
+    parts = argument.split(maxsplit=1)
+    if not parts:
+        renderer.info("用法: /apikey <提供商> [密钥]（如 /apikey deepseek sk-xxx）")
+        return
+    provider = parts[0].lower()
+    if len(parts) == 1:
+        current = _current_provider_key(agent, provider)
+        renderer.info(f"当前 {provider} API Key: {mask_key(current) or '未配置（回退环境变量）'}")
+        return
+    agent.llm.set_api_key(provider, parts[1])
+    renderer.info(f"{provider} 的 API Key 已更新并保存（下次提问生效）")
+
+
+def _current_provider_key(agent: Agent, provider: str) -> str | None:
+    """获取提供商当前生效的 API Key（运行时配置优先）。
+
+    Args:
+        agent: Agent 实例。
+        provider: 提供商名。
+
+    Returns:
+        明文 Key；未配置返回 None。
+    """
+    store = getattr(agent.llm, "_store", None)
+    if store is None:
+        return None
+    info = store.get_provider(provider)
+    return info.api_key if info else None
+
+
+def _handle_baseurl(argument: str, renderer: Renderer, agent: Agent) -> None:
+    """处理 /baseurl 命令：设置提供商 Base URL。
+
+    Args:
+        argument: ``<提供商> <URL>`` 参数。
+        renderer: 渲染器。
+        agent: Agent 实例。
+    """
+    parts = argument.split(maxsplit=1)
+    if len(parts) < 2:
+        renderer.info("用法: /baseurl <提供商> <URL>（如 /baseurl deepseek https://api.deepseek.com）")
+        return
+    agent.llm.set_api_base(parts[0].lower(), parts[1])
+    renderer.info(f"{parts[0].lower()} 的 Base URL 已更新")
+
+
+def _show_providers(renderer: Renderer, store: ProviderStore) -> None:
+    """展示已配置的提供商列表。
+
+    Args:
+        renderer: 渲染器。
+        store: 运行时配置存储。
+    """
+    providers = store.list_providers()
+    if not providers:
+        renderer.info("尚未配置任何提供商，可用 /apikey <名称> <密钥> 添加")
+        return
+    renderer.info(f"当前模型: {store.model}")
+    for p in providers:
+        base = p["api_base"] or "（默认）"
+        key = p["api_key_masked"] or "（未配置，回退环境变量）"
+        renderer.info(f"{p['name']}: Key {key} · Base {base}")
+
+
+def _show_config(
+    renderer: Renderer,
+    store: ProviderStore,
+    settings: Settings,
+) -> None:
+    """展示完整运行时配置摘要。
+
+    Args:
+        renderer: 渲染器。
+        store: 运行时配置存储。
+        settings: 全局配置。
+    """
+    renderer.info(f"模型: {store.model}")
+    renderer.info(f"权限模式: {settings.permissions.default}")
+    renderer.info(f"工作目录: {settings.cwd}")
+    renderer.info(f"会话目录: {settings.session_dir}")
+    renderer.info(f"最大工具轮数: {settings.max_turns}")
+    _show_providers(renderer, store)
 
 
 def _print_fatal(message: str) -> None:
@@ -369,20 +486,20 @@ def serve_web(
     host: Annotated[str, typer.Option("--host", "-h", help="监听地址")] = "127.0.0.1",
     port: Annotated[int, typer.Option("--port", "-p", help="监听端口")] = 8000,
 ) -> None:
-    """启动 Web 服务（多用户浏览器界面，需 AGENT_WEB_TOKEN）。"""
+    """启动 Web 服务（多用户浏览器界面，可选 AGENT_WEB_TOKEN 认证）。"""
     _load_dotenv_files()
     try:
         settings = load_settings()
     except ConfigError as exc:
         _print_fatal(f"配置错误: {exc}")
         raise typer.Exit(code=1) from exc
-    if not os.environ.get("AGENT_WEB_TOKEN"):
-        _print_fatal("未设置 AGENT_WEB_TOKEN，无法启动 Web 服务（多用户访问需要口令）")
-        raise typer.Exit(code=1)
+    token = os.environ.get("AGENT_WEB_TOKEN")
     console = create_console()
+    if not token:
+        console.print("[yellow]警告: 未设置 AGENT_WEB_TOKEN，以无认证模式启动（仅限互信网络）[/yellow]")
     from agent_shell.server.app import create_app
 
-    application = create_app(settings, api_token=os.environ.get("AGENT_WEB_TOKEN"))
+    application = create_app(settings, api_token=token)
     console.print(
         f"[bold green]Web 服务已启动:[/bold green] http://{host}:{port}  "
         f"[dim](模型: {settings.model}, 工作目录: {settings.cwd})[/dim]"

@@ -32,6 +32,14 @@ function buildWsUrl(sessionId, token) {
   return url
 }
 
+function draftProviders(providers) {
+  const out = {}
+  for (const p of providers || []) {
+    out[p.name] = { api_key: '', api_base: p.api_base || '' }
+  }
+  return out
+}
+
 export default function App() {
   const [sessions, setSessions] = useState([])
   const [current, setCurrent] = useState(null)
@@ -43,14 +51,66 @@ export default function App() {
   const [pending, setPending] = useState(null)
   const [draft, setDraft] = useState('')
   const [model, setModel] = useState('')
+  const [providers, setProviders] = useState([])
+  const [allModels, setAllModels] = useState({})
+  const [config, setConfig] = useState(null)
+  const [showSettings, setShowSettings] = useState(false)
+  const [showModelPicker, setShowModelPicker] = useState(false)
+  const [propsDraft, setPropsDraft] = useState({ model: '', providers: {} })
+  const [testing, setTesting] = useState(false)
+  const [stopping, setStopping] = useState(false)
   const wsRef = useRef(null)
   const messagesRef = useRef(null)
+  const modelPickerRef = useRef(null)
 
   useEffect(() => {
     api('/api/health')
       .then((data) => setModel(data.model || ''))
       .catch(() => {})
   }, [])
+
+  const loadProviders = useCallback(() => {
+    api('/api/providers')
+      .then((data) => {
+        setProviders(data.providers || [])
+        // 收集所有可用模型
+        const modelsMap = {}
+        const promises = (data.providers || []).map((p) =>
+          api(`/api/providers/${p.name}/models`)
+            .then((m) => { modelsMap[p.name] = m.models || [] })
+            .catch(() => { modelsMap[p.name] = [] })
+        )
+        return Promise.all(promises).then(() => setAllModels(modelsMap))
+      })
+      .catch(() => {})
+  }, [])
+
+  const loadConfig = useCallback(() => {
+    api('/api/config')
+      .then((data) => {
+        setConfig(data)
+        setPropsDraft({ model: data.model || '', providers: draftProviders(data.providers) })
+        loadProviders()
+      })
+      .catch(() => {})
+  }, [loadProviders])
+
+  // 点击外部关闭模型选择器
+  useEffect(() => {
+    const handleClickOutside = (e) => {
+      if (modelPickerRef.current && !modelPickerRef.current.contains(e.target)) {
+        setShowModelPicker(false)
+      }
+    }
+    if (showModelPicker) {
+      document.addEventListener('mousedown', handleClickOutside)
+      return () => document.removeEventListener('mousedown', handleClickOutside)
+    }
+  }, [showModelPicker])
+
+  useEffect(() => {
+    if (token) loadConfig()
+  }, [token, loadConfig])
 
   useEffect(() => {
     const el = messagesRef.current
@@ -165,7 +225,7 @@ export default function App() {
             setPending({ ...turn })
             break
           case 'tool_result': {
-            const tc = turn.tool_calls.find((c) => c.name === msg.name && !c.status)
+            const tc = turn.tool_calls.find((c) => c.name === msg.name && c.status === 'running')
             if (tc) {
               tc.status = msg.is_error ? 'error' : 'done'
               tc.output = msg.content
@@ -181,6 +241,7 @@ export default function App() {
               setHistory((prev) => [...prev, turn])
               setPending(null)
               setBusy(false)
+              setStopping(false)
               setStatus('')
               ws.close()
               wsRef.current = null
@@ -193,6 +254,7 @@ export default function App() {
       }
       ws.onerror = () => {
         setBusy(false)
+        setStopping(false)
         setError('连接失败（请确认已启动服务且网络正常）')
       }
       ws.onopen = () => {
@@ -213,6 +275,100 @@ export default function App() {
     [current, busy, send],
   )
 
+  const stop = useCallback(() => {
+    if (wsRef.current && busy) {
+      wsRef.current.send(JSON.stringify({ type: 'stop' }))
+      setStopping(true)
+      setStatus('正在停止…')
+    }
+  }, [busy])
+
+  const saveConfig = useCallback(async () => {
+    setError('')
+    try {
+      const { model: modelName } = propsDraft
+      if (modelName && modelName.trim() && modelName.trim() !== config?.model) {
+        const provider = modelName.trim().split('/')[0]
+        await api('/api/config', {
+          method: 'PUT',
+          body: JSON.stringify({ provider, model: modelName.trim() }),
+        })
+      }
+      for (const [name, p] of Object.entries(propsDraft.providers)) {
+        const body = { provider: name }
+        if (p.api_key && p.api_key.trim()) body.api_key = p.api_key.trim()
+        if (p.api_base && p.api_base.trim()) body.api_base = p.api_base.trim()
+        await api('/api/config', { method: 'PUT', body: JSON.stringify(body) })
+      }
+      setShowSettings(false)
+      loadConfig()
+      setModel(propsDraft.model.trim() || model)
+    } catch (e) {
+      setError(`保存配置失败: ${e.message}`)
+    }
+  }, [propsDraft, config, loadConfig, model])
+
+  const switchModel = useCallback(async (modelName) => {
+    if (!modelName || modelName === model) {
+      setShowModelPicker(false)
+      return
+    }
+    setError('')
+    try {
+      await api('/api/model/switch', {
+        method: 'POST',
+        body: JSON.stringify({ model: modelName }),
+      })
+      setModel(modelName)
+      setShowModelPicker(false)
+    } catch (e) {
+      setError(`切换模型失败: ${e.message}`)
+    }
+  }, [model])
+
+  const addProvider = useCallback(async (name, apiKey, apiBase) => {
+    setError('')
+    try {
+      await api('/api/providers', {
+        method: 'POST',
+        body: JSON.stringify({ name, api_key: apiKey, api_base: apiBase }),
+      })
+      loadProviders()
+      loadConfig()
+    } catch (e) {
+      setError(`添加提供商失败: ${e.message}`)
+    }
+  }, [loadProviders, loadConfig])
+
+  const removeProvider = useCallback(async (name) => {
+    setError('')
+    try {
+      await api(`/api/providers/${name}`, { method: 'DELETE' })
+      loadProviders()
+      loadConfig()
+    } catch (e) {
+      setError(`删除提供商失败: ${e.message}`)
+    }
+  }, [loadProviders, loadConfig])
+
+  const testConfig = useCallback(async () => {
+    setTesting(true)
+    setError('')
+    try {
+      const body = { model: propsDraft.model.trim() || config?.model }
+      const data = await api('/api/config/test', {
+        method: 'POST',
+        body: JSON.stringify(body),
+      })
+      setConfig((c) => ({ ...c, test: data }))
+      if (!data.ok) setError(`连接测试失败: ${data.error}`)
+    } catch (e) {
+      setError(`连接测试失败: ${e.message}`)
+    } finally {
+      setTesting(false)
+    }
+  }, [propsDraft, config])
+
   return (
     <div className="layout">
       <aside className="sidebar">
@@ -222,19 +378,6 @@ export default function App() {
         <button className="new-chat" onClick={newSession} disabled={busy}>
           <span className="new-chat-plus">+</span> 新会话
         </button>
-        <div className="token-box">
-          <input
-            type="password"
-            placeholder="AGENT_WEB_TOKEN"
-            value={token}
-            onChange={(e) => {
-              setToken(e.target.value)
-              setError('')
-              localStorage.setItem('agent_web_token', e.target.value)
-              if (e.target.value) refreshSessions()
-            }}
-          />
-        </div>
         <div className="session-label">会话 · 悬停重命名 / 删除</div>
         <ul className="session-list">
           {sessions.map((s) => (
@@ -256,7 +399,67 @@ export default function App() {
           <span className="chat-title">
             {current ? `会话 ${current.slice(0, 8)}` : '未选择会话'}
           </span>
-          {model && <span className="model-badge">{model}</span>}
+          <div className="header-right">
+            {model && (
+              <div className="model-picker" ref={modelPickerRef}>
+                <button
+                  className="model-picker-btn"
+                  onClick={() => setShowModelPicker(!showModelPicker)}
+                  title="点击切换模型"
+                >
+                  <span className="model-name">{model.split('/').pop() || model}</span>
+                  <span className="model-provider">{model.split('/')[0]}</span>
+                  <span className="dropdown-arrow">▾</span>
+                </button>
+                {showModelPicker && (
+                  <div className="model-dropdown">
+                    {providers.length === 0 ? (
+                      <div className="dropdown-empty">暂无提供商，请先配置 API Key</div>
+                    ) : (
+                      providers.map((p) => (
+                        <div className="dropdown-group" key={p.name}>
+                          <div className="dropdown-group-label">{p.name}</div>
+                          {(allModels[p.name] || []).map((m) => (
+                            <button
+                              key={m}
+                              className={`dropdown-item ${m === model ? 'active' : ''}`}
+                              onClick={() => switchModel(m)}
+                            >
+                              <span className="item-model">{m.split('/').pop()}</span>
+                              {m === model && <span className="item-check">✓</span>}
+                            </button>
+                          ))}
+                          {(allModels[p.name] || []).length === 0 && (
+                            <div className="dropdown-empty-small">输入自定义模型名</div>
+                          )}
+                          <div className="dropdown-custom">
+                            <input
+                              type="text"
+                              placeholder="自定义模型名 (如 qwen3.5:latest)"
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter') {
+                                  const v = e.target.value.trim()
+                                  if (v) switchModel(`${p.name}/${v}`)
+                                }
+                              }}
+                            />
+                          </div>
+                        </div>
+                      ))
+                    )}
+                    <div className="dropdown-footer">
+                      <button onClick={() => { setShowModelPicker(false); setShowSettings(true) }}>
+                        管理提供商 ⚙
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+            <button className="settings-btn" title="模型与 API Key 设置" onClick={() => setShowSettings(true)}>
+              ⚙
+            </button>
+          </div>
         </header>
         {error && <div className="error-banner">{error}</div>}
         <div className="messages" ref={messagesRef}>
@@ -287,16 +490,35 @@ export default function App() {
                 if (e.key === 'Enter') submit(draft)
               }}
             />
-            <button
-              className="send-btn"
-              disabled={!current || busy || !draft.trim()}
-              onClick={() => submit(draft)}
-            >
-              ➤
-            </button>
+            {busy ? (
+              <button className="stop-btn" onClick={stop} disabled={stopping}>
+                ■
+              </button>
+            ) : (
+              <button
+                className="send-btn"
+                disabled={!current || !draft.trim()}
+                onClick={() => submit(draft)}
+              >
+                ➤
+              </button>
+            )}
           </div>
         </div>
       </main>
+      {showSettings && (
+        <SettingsModal
+          config={config}
+          draft={propsDraft}
+          testing={testing}
+          onChange={setPropsDraft}
+          onSave={saveConfig}
+          onTest={testConfig}
+          onClose={() => setShowSettings(false)}
+          onAddProvider={addProvider}
+          onRemoveProvider={removeProvider}
+        />
+      )}
     </div>
   )
 }
@@ -417,6 +639,163 @@ function toolSummary(tc) {
   }
 }
 
+function SettingsModal({ config, draft, testing, onChange, onSave, onTest, onClose, onAddProvider, onRemoveProvider }) {
+  const providers = draft.providers || {}
+  const test = config?.test
+  const [showAddProvider, setShowAddProvider] = useState(false)
+  const [newProvider, setNewProvider] = useState({ name: '', api_key: '', api_base: '', default_model: '' })
+
+  const handleAddProvider = () => {
+    if (!newProvider.name.trim()) return
+    onAddProvider({
+      name: newProvider.name.trim(),
+      api_key: newProvider.api_key.trim() || undefined,
+      api_base: newProvider.api_base.trim() || undefined,
+      default_model: newProvider.default_model.trim() || undefined,
+    })
+    setNewProvider({ name: '', api_key: '', api_base: '', default_model: '' })
+    setShowAddProvider(false)
+  }
+
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="settings-modal" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-head">
+          <span className="modal-title">⚙ 模型与 API Key</span>
+          <button className="modal-close" onClick={onClose}>✕</button>
+        </div>
+
+        <div className="modal-section">
+          <div className="field-label">当前模型（litellm 格式，带提供商前缀）</div>
+          <input
+            type="text"
+            className="field-input"
+            placeholder="openai/gpt-4o-mini"
+            value={draft.model}
+            onChange={(e) => onChange({ ...draft, model: e.target.value })}
+          />
+        </div>
+
+        <div className="modal-section">
+          <div className="field-label">
+            提供商
+            <button
+              className="btn-add-provider"
+              onClick={() => setShowAddProvider(!showAddProvider)}
+            >
+              {showAddProvider ? '取消' : '+ 添加提供商'}
+            </button>
+          </div>
+
+          {showAddProvider && (
+            <div className="add-provider-form">
+              <input
+                type="text"
+                className="field-input"
+                placeholder="提供商名（如 openai, deepseek, anthropic）"
+                value={newProvider.name}
+                onChange={(e) => setNewProvider({ ...newProvider, name: e.target.value })}
+              />
+              <input
+                type="password"
+                className="field-input"
+                placeholder="API Key"
+                value={newProvider.api_key}
+                onChange={(e) => setNewProvider({ ...newProvider, api_key: e.target.value })}
+              />
+              <input
+                type="text"
+                className="field-input"
+                placeholder="Base URL（可选，如 https://api.deepseek.com）"
+                value={newProvider.api_base}
+                onChange={(e) => setNewProvider({ ...newProvider, api_base: e.target.value })}
+              />
+              <input
+                type="text"
+                className="field-input"
+                placeholder="默认模型（可选，如 gpt-4o-mini）"
+                value={newProvider.default_model}
+                onChange={(e) => setNewProvider({ ...newProvider, default_model: e.target.value })}
+              />
+              <button className="btn primary" onClick={handleAddProvider}>
+                确认添加
+              </button>
+            </div>
+          )}
+
+          {Object.keys(providers).length === 0 && !showAddProvider ? (
+            <div className="field-hint">
+              暂无已配置的提供商。填写上方模型后保存，即可用 /apikey（终端）或此处（Web）添加。
+            </div>
+          ) : (
+            Object.entries(providers).map(([name, p]) => (
+              <div className="provider-row" key={name}>
+                <div className="provider-row-head">
+                  <span className="provider-name">{name}</span>
+                  <span className="provider-meta">
+                    {config?.providers?.find((x) => x.name === name)?.api_key_masked || '未配置 Key'}
+                  </span>
+                  <button
+                    className="btn-remove-provider"
+                    title="删除提供商"
+                    onClick={() => {
+                      if (window.confirm(`确定删除提供商「${name}」？`)) {
+                        onRemoveProvider(name)
+                      }
+                    }}
+                  >
+                    ✕
+                  </button>
+                </div>
+                <input
+                  type="password"
+                  className="field-input"
+                  placeholder="API Key（留空则不修改）"
+                  value={p.api_key}
+                  onChange={(e) =>
+                    onChange({
+                      ...draft,
+                      providers: { ...providers, [name]: { ...p, api_key: e.target.value } },
+                    })
+                  }
+                />
+                <input
+                  type="text"
+                  className="field-input"
+                  placeholder="Base URL（可选，如 https://api.deepseek.com）"
+                  value={p.api_base}
+                  onChange={(e) =>
+                    onChange({
+                      ...draft,
+                      providers: { ...providers, [name]: { ...p, api_base: e.target.value } },
+                    })
+                  }
+                />
+              </div>
+            ))
+          )}
+        </div>
+
+        {test && (
+          <div className={`test-result ${test.ok ? 'ok' : 'fail'}`}>
+            {test.ok
+              ? `✓ 连接成功，延迟 ${test.latency_ms}ms（${test.model}）`
+              : `✗ 连接失败（${test.model}）: ${test.error}`}
+          </div>
+        )}
+
+        <div className="modal-actions">
+          <button className="btn primary" onClick={onSave}>保存</button>
+          <button className="btn plain" onClick={onTest} disabled={testing}>
+            {testing ? '测试中…' : '测试连接'}
+          </button>
+          <button className="btn plain" onClick={onClose}>关闭</button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function Message({ msg }) {
   const isUser = msg.role === 'user'
   const [expanded, setExpanded] = useState(() => new Set())
@@ -450,11 +829,6 @@ function Message({ msg }) {
     <div className={`msg ${isUser ? 'user' : 'assistant'}`}>
       <div className={`avatar ${isUser ? 'me' : 'ai'}`}>{isUser ? '我' : 'AI'}</div>
       <div className="msg-body">
-        {msg.content && (
-          <div className="bubble">
-            {isUser ? msg.content : <Markdown text={msg.content} />}
-          </div>
-        )}
         {calls.length > 0 && (
           <div className="tool-calls">
             {calls.length > 1 && (
@@ -491,6 +865,11 @@ function Message({ msg }) {
                 </div>
               )
             })}
+          </div>
+        )}
+        {msg.content && (
+          <div className="bubble">
+            {isUser ? msg.content : <Markdown text={msg.content} />}
           </div>
         )}
       </div>

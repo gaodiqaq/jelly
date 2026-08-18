@@ -21,7 +21,11 @@ _HELP_TEXT = """\
   /exit /quit      退出
   /help            显示本帮助
   /clear           清空会话历史（重新开始）
-  /model <名称>    切换模型（如 /model openai/gpt-4o-mini）
+  /model <名称>    切换模型并持久化（如 /model openai/gpt-4o-mini）
+  /apikey <商> [密钥]   设置 API Key（不带密钥则查看当前掩码）
+  /baseurl <商> <URL>   设置自定义 Base URL（DeepSeek 等兼容端点）
+  /providers        列出已配置的提供商
+  /config           查看完整运行时配置
   /auto            切换为自动审批模式（不再询问工具权限）
   /ask             切回逐个询问模式
   /session         显示当前会话 ID 与文件路径

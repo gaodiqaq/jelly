@@ -9,14 +9,16 @@ from __future__ import annotations
 import asyncio
 import threading
 from collections.abc import Awaitable, Callable
+from pathlib import Path
 from typing import Any
 
 from agent_shell.config import Settings
-from agent_shell.core import Agent, AgentCallbacks, LLMError, Session
+from agent_shell.core import Agent, AgentCallbacks, AgentInterrupted, LLMError, Session
 from agent_shell.core.executor import ToolExecutor
 from agent_shell.errors import SessionError
 from agent_shell.llm.client import LLMClient
 from agent_shell.llm.prompts import build_system_prompt
+from agent_shell.runtime import ProviderStore
 from agent_shell.server.events import (
     DoneEvent,
     ErrorEvent,
@@ -37,13 +39,27 @@ class SessionManager:
 
     Args:
         settings: 全局配置。
-        llm: LLM 客户端；None 时按配置构建（测试可注入脚本化实现）。
+        llm: LLM 客户端；None 时基于运行时配置构建（测试可注入脚本化实现）。
+        store: 运行时配置存储；None 时新建并载入启动配置。
+        session_dir: 会话存储目录；None 使用 settings.session_dir
+            （多用户隔离时传入用户专属目录）。
     """
 
-    def __init__(self, settings: Settings, llm: Any | None = None) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        llm: Any | None = None,
+        store: ProviderStore | None = None,
+        session_dir: Path | None = None,
+    ) -> None:
         self._settings = settings
-        self._llm = llm or LLMClient(settings)
+        self._store = store or ProviderStore()
+        if llm is None:
+            self._store.seed_from_settings(settings)
+        self._llm = llm or LLMClient(settings, self._store)
+        self._session_dir = session_dir or settings.session_dir
         self._locks: dict[str, asyncio.Lock] = {}
+        self._cancel: dict[str, threading.Event] = {}
         self._todo: dict[str, TodoStore] = {}
         self._sessions: dict[str, Session] = {}
 
@@ -55,12 +71,13 @@ class SessionManager:
         Returns:
             新会话实例（已含系统消息）。
         """
+        model = self._store.model
         system_prompt = self._settings.system_prompt or build_system_prompt(
-            self._settings.cwd, self._settings.model
+            self._settings.cwd, model
         )
         session = Session.create(
-            self._settings.session_dir,
-            self._settings.model,
+            self._session_dir,
+            model,
             self._settings.cwd,
             system_prompt=system_prompt,
         )
@@ -83,7 +100,7 @@ class SessionManager:
         """
         session = self._sessions.get(session_id)
         if session is None:
-            session = Session.resume(self._settings.session_dir, session_id)
+            session = Session.resume(self._session_dir, session_id)
             self._sessions[session_id] = session
         self._todo.setdefault(session_id, TodoStore())
         return session
@@ -94,7 +111,7 @@ class SessionManager:
         Returns:
             会话元信息列表。
         """
-        return [meta.__dict__ for meta in Session.list_sessions(self._settings.session_dir)]
+        return [meta.__dict__ for meta in Session.list_sessions(self._session_dir)]
 
     def serialize_messages(self, session: Session) -> list[dict[str, Any]]:
         """将会话消息历史序列化为前端可渲染的 JSON。
@@ -159,7 +176,8 @@ class SessionManager:
         self._sessions.pop(session_id, None)
         self._todo.pop(session_id, None)
         self._locks.pop(session_id, None)
-        path = self._settings.session_dir / f"{session_id}.jsonl"
+        self._cancel.pop(session_id, None)
+        path = self._session_dir / f"{session_id}.jsonl"
         if path.is_file():
             try:
                 path.unlink()
@@ -207,6 +225,8 @@ class SessionManager:
             session.set_title(user_input.splitlines()[0][:24])
             session.save()
         event_queue: asyncio.Queue[ServerEvent | None] = asyncio.Queue()
+        cancel_event = threading.Event()
+        self._cancel[session_id] = cancel_event
         loop = asyncio.get_running_loop()
 
         def push(event: ServerEvent) -> None:
@@ -251,13 +271,16 @@ class SessionManager:
 
         def worker() -> None:
             try:
-                agent = self._build_agent(session, callbacks)
+                agent = self._build_agent(session, callbacks, cancel_event)
                 agent.run(user_input)
+            except AgentInterrupted:
+                push(StatusEvent(message="已停止"))
             except LLMError:
                 pass
             except Exception as exc:  # noqa: BLE001 - 工作线程兜底，保证 sentinel 送达
                 push(ErrorEvent(message=f"{type(exc).__name__}: {exc}"))
             finally:
+                self._cancel.pop(session_id, None)
                 push(None)
 
         thread = threading.Thread(target=worker, name=f"agent-{session_id}", daemon=True)
@@ -269,12 +292,28 @@ class SessionManager:
             await emit(event)
         await emit(DoneEvent())
 
-    def _build_agent(self, session: Session, callbacks: AgentCallbacks) -> Agent:
+    def request_cancel(self, session_id: str) -> None:
+        """请求停止当前会话的运行（软停止，工作线程在检查点退出）。
+
+        Args:
+            session_id: 会话唯一标识。
+        """
+        cancel_event = self._cancel.get(session_id)
+        if cancel_event is not None:
+            cancel_event.set()
+
+    def _build_agent(
+        self,
+        session: Session,
+        callbacks: AgentCallbacks,
+        cancel_event: threading.Event | None = None,
+    ) -> Agent:
         """构建单轮运行的 Agent（每个会话独立工具状态）。
 
         Args:
             session: 会话实例。
             callbacks: 事件回调。
+            cancel_event: 取消事件；Web 端"停止"时置位，Agent 在检查点终止。
 
         Returns:
             Agent 实例。
@@ -299,4 +338,5 @@ class SessionManager:
             executor,
             callbacks,
             stream=True,
+            cancel_event=cancel_event,
         )

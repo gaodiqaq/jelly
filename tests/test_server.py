@@ -8,6 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from agent_shell.config import PermissionsConfig, Settings
+from agent_shell.runtime import ProviderStore
 from agent_shell.server.app import create_app
 from agent_shell.server.manager import SessionManager
 from agent_shell.types import AssistantMessage, ToolCall
@@ -46,7 +47,9 @@ def make_client(
     api_token: str | None = None,
 ) -> TestClient:
     """用指定脚本回复构造测试客户端（默认禁用鉴权，避免 .env 污染）。"""
-    app = create_app(settings, SessionManager(settings, ScriptedLLM(replies)), api_token=api_token)
+    store = ProviderStore(settings.session_dir / "runtime-config.yaml")
+    manager = SessionManager(settings, ScriptedLLM(replies), store=store)
+    app = create_app(settings, manager, api_token=api_token, store=store)
     return TestClient(app)
 
 

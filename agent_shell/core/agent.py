@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
@@ -91,6 +92,7 @@ class Agent:
         *,
         single_shot: bool = False,
         stream: bool = True,
+        cancel_event: threading.Event | None = None,
     ) -> None:
         self._settings = settings
         self._session = session
@@ -99,6 +101,7 @@ class Agent:
         self._callbacks = callbacks or AgentCallbacks()
         self._single_shot = single_shot
         self._stream = stream
+        self._cancel_event = cancel_event
         self.state = AgentState.IDLE
 
     @property
@@ -159,8 +162,9 @@ class Agent:
         tools = [spec for spec in self._executor.registry.specs()]
         turns = 0
         while True:
+            self._check_cancelled()
             self._emit_status(
-                f"正在调用模型 {self._settings.model}"
+                f"正在调用模型 {self._llm.model}"
                 + (f"（第 {turns + 1} 轮）" if turns > 0 else "")
                 + " …"
             )
@@ -199,6 +203,7 @@ class Agent:
         Args:
             call: 模型发起的工具调用。
         """
+        self._check_cancelled()
         if self._callbacks.on_tool_call is not None:
             self._callbacks.on_tool_call(call)
         result = self._executor.execute(call)
@@ -212,6 +217,11 @@ class Agent:
                 is_error=result.is_error,
             )
         )
+
+    def _check_cancelled(self) -> None:
+        """检查取消事件；已请求停止时抛出 :class:`AgentInterrupted`。"""
+        if self._cancel_event is not None and self._cancel_event.is_set():
+            raise AgentInterrupted("已停止")
 
     def _emit_status(self, text: str) -> None:
         """发送状态提示。

@@ -98,6 +98,17 @@ class ClientMessage(BaseModel):
     content: str = Field(min_length=1)
 
 
+class StopMessage(BaseModel):
+    """客户端请求停止当前生成。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["stop"] = "stop"
+
+
+ClientEvent = Annotated[ClientMessage | StopMessage, Field(discriminator="type")]
+
+
 __all__ = [
     "ServerEvent",
     "StatusEvent",
@@ -108,4 +119,6 @@ __all__ = [
     "ErrorEvent",
     "DoneEvent",
     "ClientMessage",
+    "StopMessage",
+    "ClientEvent",
 ]
