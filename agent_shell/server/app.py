@@ -413,6 +413,86 @@ def create_app(
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         return {"deleted": session_id}
 
+    @app.get("/api/skills", dependencies=[Depends(auth)])
+    def list_skills(request: Request) -> dict[str, Any]:
+        """列出所有可用的 skills。"""
+        from agent_shell.skills import list_skills
+        return {"skills": list_skills()}
+
+    @app.post("/api/skills/install", dependencies=[Depends(auth)])
+    def install_skill(request: Request, body: dict[str, Any]) -> dict[str, Any]:
+        """从 URL 安装 skill。
+        
+        Body: {"url": "https://..."} 或 {"name": "...", "description": "...", "triggers": [...], "prompt_template": "..."}
+        """
+        from agent_shell.skills.installer import (
+            install_skill_from_url,
+            install_skill_from_definition,
+        )
+        from agent_shell.skills.registry import get_global_registry
+        
+        try:
+            if "url" in body:
+                # 从 URL 安装
+                definition = install_skill_from_url(body["url"])
+            else:
+                # 从参数安装
+                definition = install_skill_from_definition(
+                    name=body.get("name", ""),
+                    description=body.get("description", ""),
+                    triggers=body.get("triggers", []),
+                    prompt_template=body.get("prompt_template", ""),
+                    author=body.get("author", ""),
+                )
+            
+            # 重新加载 registry
+            registry = get_global_registry()
+            registry.auto_discover()
+            
+            return {
+                "success": True,
+                "skill": {
+                    "name": definition.name,
+                    "description": definition.description,
+                    "triggers": definition.triggers,
+                },
+            }
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+    @app.post("/api/skills/reload", dependencies=[Depends(auth)])
+    def reload_skills(request: Request) -> dict[str, Any]:
+        """重新加载所有 skills（无需重启服务）。"""
+        from agent_shell.skills.registry import get_global_registry
+        from agent_shell.skills import list_skills
+        
+        registry = get_global_registry()
+        registry.auto_discover()
+        
+        return {
+            "success": True,
+            "skills": list_skills(),
+        }
+
+    @app.delete("/api/skills/{name}", dependencies=[Depends(auth)])
+    def uninstall_skill(request: Request, name: str) -> dict[str, Any]:
+        """卸载 skill。"""
+        from agent_shell.skills.installer import uninstall_skill
+        from agent_shell.skills.registry import get_global_registry
+        from agent_shell.skills import list_skills
+        
+        if uninstall_skill(name):
+            # 重新加载 registry
+            registry = get_global_registry()
+            registry.auto_discover()
+            return {
+                "success": True,
+                "message": f"Skill '{name}' uninstalled",
+                "skills": list_skills(),
+            }
+        else:
+            raise HTTPException(status_code=404, detail=f"Skill '{name}' not found")
+
     @app.get(
         "/api/sessions/{session_id}/messages",
         dependencies=[Depends(auth)],

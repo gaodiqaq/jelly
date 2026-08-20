@@ -110,6 +110,7 @@ class LLMClient:
         stream: bool = True,
         model: str | None = None,
         on_token: Callable[[str], None] | None = None,
+        on_usage: Callable[[dict], None] | None = None,
     ) -> AssistantMessage:
         """调用模型补全对话。
 
@@ -119,6 +120,7 @@ class LLMClient:
             stream: 是否流式接收。
             model: 覆盖当前模型（运行时切换/连通性测试用）；None 用当前值。
             on_token: 流式文本回调（每次收到文本增量时调用，用于实时渲染）。
+            on_usage: 用量统计回调（每轮结束时调用）。
 
         Returns:
             模型回复；含 tool_calls 时 content 可能为 None。
@@ -145,17 +147,22 @@ class LLMClient:
             kwargs["tool_choice"] = "auto"
         try:
             if stream:
-                return self._complete_stream(on_token=on_token, **kwargs)
-            return self._complete_nonstream(**kwargs)
+                return self._complete_stream(on_token=on_token, on_usage=on_usage, **kwargs)
+            return self._complete_nonstream(on_usage=on_usage, **kwargs)
         except LLMError:
             raise
         except KeyboardInterrupt as exc:
             raise LLMError("模型调用被用户中断", retryable=True) from exc
 
-    def _complete_nonstream(self, **kwargs: Any) -> AssistantMessage:
+    def _complete_nonstream(
+        self,
+        on_usage: Callable[[dict], None] | None = None,
+        **kwargs: Any,
+    ) -> AssistantMessage:
         """非流式补全路径。
 
         Args:
+            on_usage: 用量统计回调。
             **kwargs: 传给 litellm.completion 的参数。
 
         Returns:
@@ -168,6 +175,17 @@ class LLMClient:
             response = litellm.completion(**kwargs)
             message = response.choices[0].message
             tool_calls = self._parse_tool_calls(message)
+            if on_usage is not None:
+                usage = getattr(response, "usage", None)
+                if usage:
+                    on_usage({
+                        "prompt_tokens": getattr(usage, "prompt_tokens", 0) or 0,
+                        "completion_tokens": getattr(usage, "completion_tokens", 0) or 0,
+                        "total_tokens": getattr(usage, "total_tokens", 0) or 0,
+                        "cache_creation_tokens": getattr(usage, "cache_creation_input_tokens", 0) or 0,
+                        "cache_read_tokens": getattr(usage, "cache_read_input_tokens", 0) or 0,
+                        "model": kwargs.get("model", ""),
+                    })
             return AssistantMessage(content=message.content, tool_calls=tool_calls)
         except LLMError:
             raise
@@ -175,7 +193,11 @@ class LLMClient:
             raise self._map_error(exc) from exc
 
     def _complete_stream(
-        self, *, on_token: Callable[[str], None] | None = None, **kwargs: Any
+        self,
+        *,
+        on_token: Callable[[str], None] | None = None,
+        on_usage: Callable[[dict], None] | None = None,
+        **kwargs: Any,
     ) -> AssistantMessage:
         """流式补全路径：累积文本与工具调用增量。
 
@@ -184,6 +206,7 @@ class LLMClient:
 
         Args:
             on_token: 文本增量回调（实时渲染）。
+            on_usage: 用量统计回调（每轮结束时调用）。
             **kwargs: 传给 litellm.completion 的参数。
 
         Returns:
@@ -194,9 +217,27 @@ class LLMClient:
         """
         content_parts: list[str] = []
         tool_chunks: dict[int, dict[str, Any]] = {}
+        model_name = kwargs.get("model", "")
         try:
+            kwargs.setdefault("stream_options", {})["include_usage"] = True
             response = litellm.completion(stream=True, **kwargs)
             for chunk in response:
+                chunk_usage = getattr(chunk, "usage", None)
+                if chunk_usage is None:
+                    hidden = getattr(chunk, "hidden_params", None)
+                    if hidden:
+                        chunk_usage = getattr(hidden, "token_usage", None)
+                if chunk_usage is not None and on_usage is not None:
+                    usage_data = {
+                        "prompt_tokens": getattr(chunk_usage, "prompt_tokens", 0) or 0,
+                        "completion_tokens": getattr(chunk_usage, "completion_tokens", 0) or 0,
+                        "total_tokens": getattr(chunk_usage, "total_tokens", 0) or 0,
+                        "cache_creation_tokens": getattr(chunk_usage, "cache_creation_input_tokens", 0) or 0,
+                        "cache_read_tokens": getattr(chunk_usage, "cache_read_input_tokens", 0) or 0,
+                        "model": model_name,
+                    }
+                    on_usage(usage_data)
+                    continue
                 if not getattr(chunk, "choices", None):
                     continue
                 delta = chunk.choices[0].delta
@@ -219,7 +260,7 @@ class LLMClient:
                             bucket["arguments"] += tc.function.arguments
         except LLMError:
             raise
-        except Exception as exc:  # noqa: BLE001 - 统一映射 litellm 异常
+        except Exception as exc:
             raise self._map_error(exc) from exc
 
         tool_calls: list[ToolCall] = []

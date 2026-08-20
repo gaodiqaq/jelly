@@ -69,6 +69,7 @@ class Session:
         self.cwd = cwd
         self.title = ""
         self.messages: list[Message] = []
+        self.skill_addon: str = ""  # Skill 增强的系统提示词
         self.created_at = datetime.now(timezone.utc).isoformat()
         try:
             self.session_dir.mkdir(parents=True, exist_ok=True)
@@ -133,6 +134,9 @@ class Session:
         system: list[Message] = (
             [self.messages[0]] if self.messages and self.messages[0].role == "system" else []
         )
+        # 如果有 skill_addon，附加到系统消息
+        if system and self.skill_addon:
+            system[0] = SystemMessage(content=system[0].content + "\n" + self.skill_addon)
         system_size = sum(len(m.model_dump_json()) for m in system)
         if system_size > budget:
             return system

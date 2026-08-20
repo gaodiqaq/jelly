@@ -24,10 +24,12 @@ from agent_shell.server.events import (
     ErrorEvent,
     MessageEvent,
     ServerEvent,
+    SkillActivatedEvent,
     StatusEvent,
     TokenEvent,
     ToolCallEvent,
     ToolResultEvent,
+    UsageEvent,
 )
 from agent_shell.tools import TodoStore, build_registry
 
@@ -221,6 +223,23 @@ class SessionManager:
             await emit(ErrorEvent(message=str(exc)))
             await emit(DoneEvent())
             return
+        
+        # 检测 Skill 命令
+        from agent_shell.skills import get_global_registry
+        registry = get_global_registry()
+        skill_result = registry.detect_and_invoke(user_input)
+        if skill_result.handled and skill_result.skill_name:
+            session.skill_addon = skill_result.system_addon
+            await emit(SkillActivatedEvent(
+                name=skill_result.skill_name,
+                description=skill_result.description,
+            ))
+            # 如果skill处理了输入（无剩余内容），直接返回
+            if not skill_result.remaining_input:
+                await emit(DoneEvent())
+                return
+            user_input = skill_result.remaining_input
+        
         if not session.title and not any(m.role == "user" for m in session.messages):
             session.set_title(user_input.splitlines()[0][:24])
             session.save()
@@ -260,6 +279,18 @@ class SessionManager:
         def on_llm_error(exc: LLMError) -> None:
             push(ErrorEvent(message=str(exc)))
 
+        def on_usage(usage: dict) -> None:
+            push(
+                UsageEvent(
+                    prompt_tokens=usage.get("prompt_tokens", 0),
+                    completion_tokens=usage.get("completion_tokens", 0),
+                    total_tokens=usage.get("total_tokens", 0),
+                    cache_creation_tokens=usage.get("cache_creation_tokens", 0),
+                    cache_read_tokens=usage.get("cache_read_tokens", 0),
+                    model=usage.get("model", ""),
+                )
+            )
+
         callbacks = AgentCallbacks(
             on_status=on_status,
             on_token=on_token,
@@ -267,6 +298,7 @@ class SessionManager:
             on_tool_result=on_tool_result,
             on_message=on_message,
             on_llm_error=on_llm_error,
+            on_usage=on_usage,
         )
 
         def worker() -> None:

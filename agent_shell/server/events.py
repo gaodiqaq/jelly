@@ -58,6 +58,16 @@ class MessageEvent(BaseModel):
     content: str
 
 
+class SkillActivatedEvent(BaseModel):
+    """Skill 模式已激活。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["skill_activated"] = "skill_activated"
+    name: str
+    description: str
+
+
 class ErrorEvent(BaseModel):
     """错误事件（模型调用失败等）。"""
 
@@ -75,6 +85,19 @@ class DoneEvent(BaseModel):
     type: Literal["done"] = "done"
 
 
+class UsageEvent(BaseModel):
+    """Token 用量统计（每轮结束时发送）。"""
+
+    model_config = ConfigDict(extra="forbid")
+    type: Literal["usage"] = "usage"
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+    cache_creation_tokens: int = 0
+    cache_read_tokens: int = 0
+    model: str = ""
+
+
 ServerEvent = Annotated[
     (
         StatusEvent
@@ -84,6 +107,7 @@ ServerEvent = Annotated[
         | MessageEvent
         | ErrorEvent
         | DoneEvent
+        | UsageEvent
     ),
     Field(discriminator="type"),
 ]
@@ -118,6 +142,7 @@ __all__ = [
     "MessageEvent",
     "ErrorEvent",
     "DoneEvent",
+    "UsageEvent",
     "ClientMessage",
     "StopMessage",
     "ClientEvent",

@@ -67,6 +67,7 @@ class AgentCallbacks:
     on_tool_result: Callable[[ToolResult], None] | None = None
     on_message: Callable[[str | None], None] | None = None
     on_llm_error: Callable[[LLMError], None] | None = None
+    on_usage: Callable[[dict], None] | None = None
 
 
 class Agent:
@@ -176,6 +177,7 @@ class Agent:
                     tools,
                     stream=self._stream,
                     on_token=self._callbacks.on_token if self._stream else None,
+                    on_usage=self._callbacks.on_usage,
                 )
             except LLMError as exc:
                 self._notify_llm_error(exc)

@@ -910,4 +910,63 @@ body {
 }
 
 .send-btn:hover:not(:disabled) { filter: brightness(1.08); }
+
+/* Usage badge - small font display */
+.usage-badge {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px;
+  background: rgba(0, 0, 0, 0.06);
+  border-radius: 10px;
+  font-size: 11px;
+  color: #6b7280;
+  white-space: nowrap;
+}
+
+.usage-tokens {
+  font-variant-numeric: tabular-nums;
+}
+
+.usage-cache {
+  color: #10b981;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
 .send-btn:disabled { background: #dfe2ec; color: #a5aab8; cursor: not-allowed; }
+
+/* ---------- Skill ---------- */
+.skill-active {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 12px;
+  background: linear-gradient(135deg, #f0f4ff, #e8f0fe);
+  border-radius: 8px;
+  margin: 0 12px 8px;
+  font-size: 13px;
+}
+.skill-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: #5b6cff;
+  color: #fff;
+  padding: 3px 8px;
+  border-radius: 4px;
+  font-weight: 600;
+}
+.skill-clear {
+  background: none;
+  border: none;
+  color: #fff;
+  cursor: pointer;
+  padding: 0 2px;
+  font-size: 12px;
+  opacity: 0.8;
+}
+.skill-clear:hover { opacity: 1; }
+.skill-desc {
+  color: #666;
+  font-size: 12px;
+}

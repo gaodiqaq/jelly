@@ -59,6 +59,9 @@ export default function App() {
   const [propsDraft, setPropsDraft] = useState({ model: '', providers: {} })
   const [testing, setTesting] = useState(false)
   const [stopping, setStopping] = useState(false)
+  const [usage, setUsage] = useState(null)
+  const [skills, setSkills] = useState([])
+  const [activeSkill, setActiveSkill] = useState(null)
   const wsRef = useRef(null)
   const messagesRef = useRef(null)
   const modelPickerRef = useRef(null)
@@ -95,6 +98,12 @@ export default function App() {
       .catch(() => {})
   }, [loadProviders])
 
+  const loadSkills = useCallback(() => {
+    api('/api/skills')
+      .then((data) => setSkills(data.skills || []))
+      .catch(() => {})
+  }, [])
+
   // 点击外部关闭模型选择器
   useEffect(() => {
     const handleClickOutside = (e) => {
@@ -109,8 +118,11 @@ export default function App() {
   }, [showModelPicker])
 
   useEffect(() => {
-    if (token) loadConfig()
-  }, [token, loadConfig])
+    if (token) {
+      loadConfig()
+      loadSkills()
+    }
+  }, [token, loadConfig, loadSkills])
 
   useEffect(() => {
     const el = messagesRef.current
@@ -209,6 +221,7 @@ export default function App() {
       setPending({ ...turn })
       setBusy(true)
       setStatus('连接中…')
+      setUsage(null)
 
       ws.onmessage = (event) => {
         const msg = JSON.parse(event.data)
@@ -248,6 +261,19 @@ export default function App() {
               refreshSessions()
             }
             break
+          case 'usage':
+            setUsage({
+              prompt_tokens: msg.prompt_tokens || 0,
+              completion_tokens: msg.completion_tokens || 0,
+              total_tokens: msg.total_tokens || 0,
+              cache_creation_tokens: msg.cache_creation_tokens || 0,
+              cache_read_tokens: msg.cache_read_tokens || 0,
+              model: msg.model || '',
+            })
+            break
+          case 'skill_activated':
+            setActiveSkill({ name: msg.name, description: msg.description })
+            break
           default:
             break
         }
@@ -269,10 +295,14 @@ export default function App() {
       if (!current || busy || !text.trim()) return
       const content = text.trim()
       setDraft('')
+      // 如果有activeSkill，附加skill命令
+      const finalContent = activeSkill
+        ? `${activeSkill.trigger} ${content}`
+        : content
       setHistory((prev) => [...prev, { role: 'user', content }])
-      send(content)
+      send(finalContent)
     },
-    [current, busy, send],
+    [current, busy, send, activeSkill],
   )
 
   const stop = useCallback(() => {
@@ -459,6 +489,18 @@ export default function App() {
             <button className="settings-btn" title="模型与 API Key 设置" onClick={() => setShowSettings(true)}>
               ⚙
             </button>
+            {usage && (
+              <div className="usage-badge" title={`模型: ${usage.model}\n缓存命中率: ${usage.cache_read_tokens}/${usage.prompt_tokens}`}>
+                <span className="usage-tokens">
+                  ↑{usage.prompt_tokens} ↓{usage.completion_tokens} ({usage.total_tokens})
+                </span>
+                {usage.cache_read_tokens > 0 && (
+                  <span className="usage-cache">
+                    ⚡{Math.round(usage.cache_read_tokens / Math.max(usage.prompt_tokens, 1) * 100)}%
+                  </span>
+                )}
+              </div>
+            )}
           </div>
         </header>
         {error && <div className="error-banner">{error}</div>}
@@ -478,6 +520,21 @@ export default function App() {
           {pending && <Message msg={pending} />}
           {status && <div className="status">{status}</div>}
         </div>
+        {activeSkill && (
+          <div className="skill-active">
+            <span className="skill-badge">
+              🔧 {activeSkill.name}
+              <button className="skill-clear" onClick={() => {
+                setActiveSkill(null)
+                // 重新加载会话以清除skill
+                if (current) refreshSessions().then(() => {
+                  // 重置skill状态
+                })
+              }}>✕</button>
+            </span>
+            <span className="skill-desc">{activeSkill.description}</span>
+          </div>
+        )}
         <div className="composer">
           <div className="composer-box">
             <input
