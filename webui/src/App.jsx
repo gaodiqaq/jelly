@@ -537,29 +537,57 @@ export default function App() {
         )}
         <div className="composer">
           <div className="composer-box">
-            <input
-              type="text"
-              placeholder={current ? '输入消息，Enter 发送' : '请先新建或选择会话'}
+            <textarea
+              placeholder={current ? '输入消息，Enter 发送，Shift+Enter 换行' : '请先新建或选择会话'}
               disabled={!current || busy}
               value={draft}
               onChange={(e) => setDraft(e.target.value)}
               onKeyDown={(e) => {
-                if (e.key === 'Enter') submit(draft)
+                if (e.key === 'Enter' && !e.shiftKey) {
+                  e.preventDefault()
+                  submit(draft)
+                }
               }}
+              rows={2}
             />
-            {busy ? (
-              <button className="stop-btn" onClick={stop} disabled={stopping}>
-                ■
-              </button>
-            ) : (
-              <button
-                className="send-btn"
-                disabled={!current || !draft.trim()}
-                onClick={() => submit(draft)}
-              >
-                ➤
-              </button>
-            )}
+            <div className="composer-toolbar">
+              <div className="toolbar-left">
+                <div className="skill-btn-wrapper">
+                  <button className="toolbar-btn skill-btn" title="Skill 命令">
+                    🔧
+                  </button>
+                  <div className="skill-popup">
+                    {skills.map((s) => (
+                      <div
+                        key={s.name}
+                        className="skill-item"
+                        onClick={() => {
+                          setDraft(s.triggers[0] + ' ')
+                      }}
+                      >
+                        <span className="skill-item-name">{s.triggers[0]}</span>
+                        <span className="skill-item-desc">{s.description}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+              <div className="toolbar-right">
+                {busy ? (
+                  <button className="stop-btn" onClick={stop} disabled={stopping}>
+                    ■
+                  </button>
+                ) : (
+                  <button
+                    className="send-btn"
+                    disabled={!current || !draft.trim()}
+                    onClick={() => submit(draft)}
+                  >
+                    ➤
+                  </button>
+                )}
+              </div>
+            </div>
           </div>
         </div>
       </main>
