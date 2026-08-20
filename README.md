@@ -6,6 +6,7 @@ AI Agent，基于 `litellm` 网关，可对接任意主流大模型（OpenAI / A
 
 - **分层架构**：`ui/`（渲染交互）、`tools/`（本地执行）、`llm/`（API 通信）、`core/`（状态机），层间仅通过类型化函数签名交互，禁止跨层调用
 - **统一 Provider 系统**：支持 OpenAI / Anthropic / DeepSeek / Gemini / 本地 Ollama / vLLM 等任意 litellm 兼容提供商，Web 端设置面板可动态添加/删除/切换，无需重启
+- **Skill 系统**：可插拔技能框架，支持 `/review` `/fix` `/refactor` `/explain` `/novel` 等斜杠命令，每个 Skill 拥有专属系统提示词，自动注入对话上下文；支持动态安装/卸载/热重载
 - **工具调用循环**：bash / read / write / edit / ls / glob / grep / web_fetch / todo 共 11 个内置工具，pydantic 参数校验，调用结果展示在文字回答上方，完成后自动标记"已完成"
 - **权限控制**：默认逐个询问（支持"本次会话始终允许/拒绝"），`--yes` 全自动、`--deny` 全拒绝，只读工具可配置免审批
 - **流式输出**：模型回复实时渲染；流式工具调用增量自动合并，思考过程可折叠
@@ -64,6 +65,12 @@ agent run --model deepseek/deepseek-chat "这个项目里哪些文件引用了 u
 | `/auto` `/ask` | 切换自动/逐个审批模式 |
 | `/session` | 当前会话 ID 与文件路径 |
 | `/tools` | 列出可用工具 |
+| `/review` | 激活代码审查 Skill |
+| `/fix` | 激活 Bug 修复 Skill |
+| `/refactor` | 激活代码重构 Skill |
+| `/explain` | 激活代码解释 Skill |
+| `/novel` | 激活小说创作 Skill |
+| `/skills` | 列出所有可用 Skill |
 
 ## 会话管理
 
@@ -95,6 +102,7 @@ export AGENT_WEB_USERS=alice:token1,bob:token2  # Linux/macOS
 - 配置了 `AGENT_WEB_USERS` 时所有请求需 `Authorization: Bearer <token>`；WS 则用 query `?token=`；未配置则不校验
 - 右上角设置面板：切换模型、填写任意提供商 Key / Base URL、连通性测试，保存后写回 `~/.agent_shell/config.yaml`，运行时立即生效
 - 生成中可点击停止按钮中断
+- **Skill 快捷入口**：输入框左下角 🔧 按钮，鼠标悬停弹出 Skill 列表，点击即可激活对应 Skill（/review /fix /refactor /explain /novel）
 - 本地开发：`cd webui && npm run dev`（代理到 8000 端口）
 
 ### Docker 部署
@@ -122,6 +130,8 @@ agent_shell/
 ├── errors.py       # 结构化异常体系
 ├── llm/            # litellm 封装：流式/非流式、异常映射、系统提示词
 ├── tools/          # 工具实现：注册表、bash、fs、search、web、todo
+├── skills/         # Skill 系统：基类、注册表、安装器、内置 Skill
+│   └── builtins/   # 内置 Skill：review、fix、refactor、explain、novel-writer
 ├── core/           # 会话持久化、工具执行器（权限）、Agent 状态机（支持停止）
 ├── server/         # FastAPI 服务：REST + WebSocket、会话管理、多用户隔离、鉴权、配置 API
 ├── ui/             # rich 渲染、REPL 输入、权限询问
