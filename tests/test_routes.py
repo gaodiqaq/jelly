@@ -110,6 +110,7 @@ def test_config_test_failed(
     settings: Settings, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """连通性失败返回错误信息（中文可读）。"""
+
     def boom(model=None, **kw):
         raise app_module.litellm.exceptions.AuthenticationError(
             message="bad key", model=None, llm_provider_name="openai"
@@ -143,15 +144,12 @@ def test_users_isolation(
         for s in client.get("/api/sessions", headers=alice_headers).json()["sessions"]
     }
     bob_ids = {
-        s["session_id"]
-        for s in client.get("/api/sessions", headers=bob_headers).json()["sessions"]
+        s["session_id"] for s in client.get("/api/sessions", headers=bob_headers).json()["sessions"]
     }
     assert alice_session in alice_ids and bob_session not in alice_ids
     assert bob_session in bob_ids and alice_session not in bob_ids
 
-    bob_msgs = client.get(
-        f"/api/sessions/{bob_session}/messages", headers=alice_headers
-    )
+    bob_msgs = client.get(f"/api/sessions/{bob_session}/messages", headers=alice_headers)
     assert bob_msgs.status_code == 404
 
 

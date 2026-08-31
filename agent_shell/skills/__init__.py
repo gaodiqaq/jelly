@@ -2,7 +2,7 @@
 
 使用方式：
     /skillname args...
-    
+
 内置skills：
     /review    - 代码审查
     /fix       - Bug修复
@@ -14,15 +14,15 @@
     POST /api/skills/reload   # 重新加载
 """
 
-from agent_shell.skills.registry import SkillRegistry, get_global_registry, list_skills
 from agent_shell.skills.installer import (
-    install_skill_from_url,
-    install_skill_from_definition,
-    uninstall_skill,
-    fetch_skill_from_url,
-    parse_skill_markdown,
     SkillDefinition,
+    fetch_skill_from_url,
+    install_skill_from_definition,
+    install_skill_from_url,
+    parse_skill_markdown,
+    uninstall_skill,
 )
+from agent_shell.skills.registry import SkillRegistry, get_global_registry, list_skills
 
 __all__ = [
     "SkillRegistry",

@@ -2,13 +2,19 @@
 
 端点:
 - ``GET  /api/health``            健康检查
-- ``GET  /api/sessions``          会话列表
-- ``POST /api/sessions``          新建会话
-- ``GET  /api/sessions/{id}/messages``  会话历史
 - ``GET  /api/config``            读取运行时配置（模型/提供商，Key 掩码）
 - ``PUT  /api/config``            更新运行时配置（热生效并持久化）
 - ``POST /api/config/test``       测试模型连通性
-- ``WS   /ws/{id}``               对话（流式事件；支持 ``{"type":"stop"}`` 停止）
+- ``GET  /api/sessions``          会话列表
+- ``POST /api/sessions``          新建会话
+- ``GET  /api/sessions/{id}/messages``  会话历史
+- ``GET  /api/permissions``       读取权限模式
+- ``PUT  /api/permissions``       切换权限模式（readonly/ask/auto/deny）
+- ``GET  /api/files``             工作区目录列表（工作台文件树）
+- ``GET  /api/file``              工作区文本文件内容（预览）
+- ``GET  /api/file/raw``          工作区文件原始字节（图片/下载）
+- ``WS   /ws/{id}``               对话（流式事件；支持 ``{"type":"stop"}`` 停止、
+                                  ``{"type":"approval_decision"}`` 权限决策）
 
 多用户: 环境变量 ``AGENT_WEB_USERS="alice:token1,bob:token2"`` 定义用户与口令，
 每个用户拥有独立的会话与待办目录（``~/.agent_shell/users/<user>/sessions``），
@@ -18,6 +24,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import mimetypes
 import os
 import threading
 import time
@@ -35,14 +43,14 @@ from fastapi import (
     WebSocket,
     WebSocketDisconnect,
 )
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from agent_shell import __version__
 from agent_shell.config import Settings, load_settings
 from agent_shell.errors import SessionError
-from agent_shell.llm.client import LLMClient
+from agent_shell.llm.client import LLMClient, is_private_base, proxy_bypass_client
 from agent_shell.runtime import ProviderStore
 from agent_shell.server.events import ClientMessage
 from agent_shell.server.manager import SessionManager
@@ -52,6 +60,37 @@ _DIST_DIR = Path(__file__).resolve().parents[2] / "webui" / "dist"
 _TOKEN_UNSET = object()
 
 _USER_DIR_TMPL = Path.home() / ".agent_shell" / "users"
+
+# 工作台文件预览的最大字符数（超出截断）
+_MAX_PREVIEW_CHARS = 200_000
+
+
+def _workspace_path(root: Path, rel: str) -> Path:
+    """把工作区相对路径安全解析为绝对路径（拒绝越出工作区）。
+
+    相对路径基于工作区根解析；绝对路径仅当位于工作区内时允许
+    （agent 回复中常出现完整路径，需可点击预览）。
+
+    Args:
+        root: 工作区根目录（settings.cwd）。
+        rel: 用户提供的路径。
+
+    Returns:
+        规范化后的绝对路径。
+
+    Raises:
+        HTTPException: 路径越出工作区（400）。
+    """
+    rel = (rel or ".").strip() or "."
+    candidate = Path(rel).expanduser()
+    try:
+        resolved = candidate.resolve() if candidate.is_absolute() else (root / candidate).resolve()
+    except OSError as exc:
+        raise HTTPException(status_code=400, detail=f"路径非法: {exc}") from exc
+    root_resolved = root.resolve()
+    if resolved != root_resolved and root_resolved not in resolved.parents:
+        raise HTTPException(status_code=400, detail="路径超出工作区范围")
+    return resolved
 
 
 class RenameRequest(BaseModel):
@@ -118,6 +157,17 @@ class ModelSwitch(BaseModel):
     """
 
     model: str = Field(min_length=1, max_length=128)
+
+
+class PermissionUpdate(BaseModel):
+    """更新权限模式请求体。
+
+    Attributes:
+        mode: ``readonly``（只读）/ ``ask``（手动审批）/ ``auto``（自动授权）/
+            ``deny``（全部拒绝）。
+    """
+
+    mode: str = Field(min_length=1, max_length=16)
 
 
 def _find_dist_dir() -> Path | None:
@@ -299,12 +349,15 @@ def create_app(
         """添加或更新提供商配置。"""
         if not body.name.strip():
             raise HTTPException(status_code=400, detail="Provider name is required")
-        store.upsert_provider(
-            body.name.strip().lower(),
-            api_key=body.api_key,
-            api_base=body.api_base,
-            default_model=body.default_model,
-        )
+        try:
+            store.upsert_provider(
+                body.name.strip().lower(),
+                api_key=body.api_key,
+                api_base=body.api_base,
+                default_model=body.default_model,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         return {"providers": store.list_providers(), "active_model": store.model}
 
     @app.delete("/api/providers/{provider}", dependencies=[Depends(auth)])
@@ -352,13 +405,20 @@ def create_app(
         kwargs: dict[str, Any] = {
             "model": model,
             "messages": [{"role": "user", "content": "ping"}],
-            "max_tokens": 5,
+            "max_tokens": 64,
             "timeout": 30,
         }
+        # 与 LLMClient 保持一致：Qwen 系列关闭思考模式，否则可能因
+        # reasoning_content 占满 max_tokens 而测试失败
+        if "qwen" in model.lower():
+            kwargs.setdefault("chat_template_kwargs", {})["enable_thinking"] = False
         if key:
             kwargs["api_key"] = key
         if base:
             kwargs["api_base"] = base
+        if base and is_private_base(base):
+            # 内网/环回地址直连：系统代理（Clash 等）会拦截内网请求返回 502
+            kwargs["client"] = proxy_bypass_client(base, key)
         start = time.perf_counter()
         try:
             litellm.completion(**kwargs)
@@ -371,6 +431,85 @@ def create_app(
             }
         latency_ms = int((time.perf_counter() - start) * 1000)
         return {"ok": True, "model": model, "latency_ms": latency_ms}
+
+    @app.get("/api/permissions", dependencies=[Depends(auth)])
+    def get_permissions(request: Request) -> dict[str, str]:
+        """读取当前权限模式（readonly/ask/auto/deny）。"""
+        return {"mode": managers.for_user(request.state.user).permission_mode}
+
+    @app.put("/api/permissions", dependencies=[Depends(auth)])
+    def update_permissions(request: Request, body: PermissionUpdate) -> dict[str, str]:
+        """切换权限模式（热生效，对后续对话轮次生效）。"""
+        try:
+            mode = managers.for_user(request.state.user).set_permission_mode(body.mode)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"mode": mode}
+
+    @app.get("/api/files", dependencies=[Depends(auth)])
+    def list_workspace_files(request: Request, path: str = Query(default=".")) -> dict[str, Any]:
+        """列出工作区内目录（工作台文件树数据源，只读）。"""
+        root = settings.cwd.resolve()
+        target = _workspace_path(settings.cwd, path)
+        if not target.is_dir():
+            raise HTTPException(status_code=404, detail=f"目录不存在: {path}")
+        try:
+            children = list(target.iterdir())
+        except OSError as exc:
+            raise HTTPException(status_code=400, detail=f"无法读取目录: {exc}") from exc
+        entries: list[dict[str, Any]] = []
+        for child in children:
+            try:
+                is_dir = child.is_dir()
+            except OSError:
+                continue
+            entry: dict[str, Any] = {"name": child.name, "type": "dir" if is_dir else "file"}
+            if not is_dir:
+                try:
+                    entry["size"] = child.stat().st_size
+                except OSError:
+                    entry["size"] = None
+            entries.append(entry)
+        entries.sort(key=lambda e: (e["type"] != "dir", e["name"].lower()))
+        rel = "." if target == root else target.relative_to(root).as_posix()
+        return {"cwd": root.name, "path": rel, "entries": entries}
+
+    @app.get("/api/file", dependencies=[Depends(auth)])
+    def read_workspace_file(request: Request, path: str) -> dict[str, Any]:
+        """读取工作区内文本文件内容（工作台预览数据源，只读）。"""
+        root = settings.cwd.resolve()
+        target = _workspace_path(settings.cwd, path)
+        if not target.is_file():
+            raise HTTPException(status_code=404, detail=f"文件不存在: {path}")
+        try:
+            data = target.read_bytes()
+        except OSError as exc:
+            raise HTTPException(status_code=400, detail=f"无法读取文件: {exc}") from exc
+        is_binary = b"\x00" in data[:4096]
+        content: str | None = None
+        truncated = False
+        if not is_binary:
+            content = data.decode("utf-8", errors="replace")
+            if len(content) > _MAX_PREVIEW_CHARS:
+                content = content[:_MAX_PREVIEW_CHARS]
+                truncated = True
+        return {
+            "path": target.relative_to(root).as_posix(),
+            "name": target.name,
+            "size": target.stat().st_size,
+            "is_binary": is_binary,
+            "truncated": truncated,
+            "content": content,
+        }
+
+    @app.get("/api/file/raw", dependencies=[Depends(auth)])
+    def read_workspace_file_raw(request: Request, path: str) -> FileResponse:
+        """返回工作区内文件的原始字节（图片预览 / 下载）。"""
+        target = _workspace_path(settings.cwd, path)
+        if not target.is_file():
+            raise HTTPException(status_code=404, detail=f"文件不存在: {path}")
+        media_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
+        return FileResponse(target, media_type=media_type, filename=target.name)
 
     @app.get("/api/sessions", dependencies=[Depends(auth)])
     def list_sessions(request: Request) -> dict[str, Any]:
@@ -401,6 +540,19 @@ def create_app(
         return {"session_id": session.session_id, "title": session.title}
 
     @app.delete(
+        "/api/sessions/{session_id}/skill",
+        dependencies=[Depends(auth)],
+    )
+    def clear_session_skill(request: Request, session_id: str) -> dict[str, Any]:
+        """清除会话当前激活的 skill（前端 ✕ 按钮）。"""
+        mgr = managers.for_user(request.state.user)
+        try:
+            cleared = mgr.clear_skill(session_id)
+        except SessionError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return {"cleared": cleared}
+
+    @app.delete(
         "/api/sessions/{session_id}",
         dependencies=[Depends(auth)],
     )
@@ -417,58 +569,55 @@ def create_app(
     def list_skills(request: Request) -> dict[str, Any]:
         """列出所有可用的 skills。"""
         from agent_shell.skills import list_skills
+
         return {"skills": list_skills()}
 
     @app.post("/api/skills/install", dependencies=[Depends(auth)])
     def install_skill(request: Request, body: dict[str, Any]) -> dict[str, Any]:
-        """从 URL 安装 skill。
-        
-        Body: {"url": "https://..."} 或 {"name": "...", "description": "...", "triggers": [...], "prompt_template": "..."}
+        """安装 skill。
+
+        Body:
+        - ``{"url": "..."}``: GitHub 仓库 URL / raw URL / 本地文件或目录路径
+        - 或 ``{"name","description","triggers","prompt_template"}``: 直接参数定义
         """
         from agent_shell.skills.installer import (
-            install_skill_from_url,
             install_skill_from_definition,
+            install_skill_from_url,
         )
-        from agent_shell.skills.registry import get_global_registry
-        
+        from agent_shell.skills.registry import reload_global_registry
+
         try:
             if "url" in body:
-                # 从 URL 安装
                 definition = install_skill_from_url(body["url"])
             else:
-                # 从参数安装
                 definition = install_skill_from_definition(
                     name=body.get("name", ""),
                     description=body.get("description", ""),
                     triggers=body.get("triggers", []),
                     prompt_template=body.get("prompt_template", ""),
+                    body=body.get("body", ""),
                     author=body.get("author", ""),
                 )
-            
-            # 重新加载 registry
-            registry = get_global_registry()
-            registry.auto_discover()
-            
+            count = reload_global_registry()
             return {
                 "success": True,
                 "skill": {
                     "name": definition.name,
                     "description": definition.description,
-                    "triggers": definition.triggers,
+                    "triggers": definition.normalize_triggers(),
                 },
+                "skills_count": count,
             }
         except ValueError as e:
-            raise HTTPException(status_code=400, detail=str(e))
+            raise HTTPException(status_code=400, detail=str(e)) from e
 
     @app.post("/api/skills/reload", dependencies=[Depends(auth)])
     def reload_skills(request: Request) -> dict[str, Any]:
         """重新加载所有 skills（无需重启服务）。"""
-        from agent_shell.skills.registry import get_global_registry
         from agent_shell.skills import list_skills
-        
-        registry = get_global_registry()
-        registry.auto_discover()
-        
+        from agent_shell.skills.registry import reload_global_registry
+
+        reload_global_registry()
         return {
             "success": True,
             "skills": list_skills(),
@@ -477,14 +626,12 @@ def create_app(
     @app.delete("/api/skills/{name}", dependencies=[Depends(auth)])
     def uninstall_skill(request: Request, name: str) -> dict[str, Any]:
         """卸载 skill。"""
-        from agent_shell.skills.installer import uninstall_skill
-        from agent_shell.skills.registry import get_global_registry
         from agent_shell.skills import list_skills
-        
+        from agent_shell.skills.installer import uninstall_skill
+        from agent_shell.skills.registry import reload_global_registry
+
         if uninstall_skill(name):
-            # 重新加载 registry
-            registry = get_global_registry()
-            registry.auto_discover()
+            reload_global_registry()
             return {
                 "success": True,
                 "message": f"Skill '{name}' uninstalled",
@@ -519,24 +666,76 @@ def create_app(
             user = None
         await websocket.accept()
         mgr = managers.for_user(user)
-        lock = mgr.lock(session_id)
+        agent_task: asyncio.Task | None = None
+
+        async def handle_approval_decision(raw: dict) -> None:
+            """回填权限决策；无匹配的待决请求时告知前端。"""
+            resolved = mgr.resolve_approval(
+                session_id, str(raw.get("id", "")), str(raw.get("decision", ""))
+            )
+            if not resolved:
+                await websocket.send_json(
+                    {"type": "error", "message": "当前没有等待审批的权限请求"}
+                )
+
         try:
             while True:
-                raw = await websocket.receive_json()
-                if raw.get("type") == "stop":
-                    mgr.request_cancel(session_id)
-                    continue
-                message = ClientMessage.model_validate(raw)
-                async with lock:
-                    await mgr.run_agent(
-                        session_id,
-                        message.content,
-                        lambda event: websocket.send_json(event.model_dump()),
+                if agent_task is None:
+                    # 等待用户消息
+                    raw = await websocket.receive_json()
+                    if raw.get("type") == "stop":
+                        await websocket.send_json({"type": "stopped", "message": "已停止"})
+                        continue
+                    if raw.get("type") == "approval_decision":
+                        await handle_approval_decision(raw)
+                        continue
+                    message = ClientMessage.model_validate(raw)
+                    agent_task = asyncio.create_task(
+                        mgr.run_agent(
+                            session_id,
+                            message.content,
+                            lambda event: websocket.send_json(event.model_dump()),
+                        )
                     )
+                else:
+                    # Agent运行中，同时监听停止消息和agent完成
+                    receive_task = asyncio.create_task(websocket.receive_json())
+                    done, pending = await asyncio.wait(
+                        {agent_task, receive_task},
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    if agent_task in done:
+                        # Agent自然完成
+                        agent_task = None
+                    else:
+                        # 收到消息（停止指令 / 权限决策 / 新消息）
+                        try:
+                            raw = receive_task.result()
+                        except Exception:
+                            raw = {}
+                        if raw.get("type") == "stop":
+                            # 请求取消并立即响应，让agent自然停止
+                            mgr.request_cancel(session_id)
+                            await websocket.send_json({"type": "stopped", "message": "已停止"})
+                        elif raw.get("type") == "approval_decision":
+                            await handle_approval_decision(raw)
+                        else:
+                            # Agent运行中收到新消息：明确告知而非静默丢弃
+                            await websocket.send_json(
+                                {
+                                    "type": "error",
+                                    "message": "当前会话正在运行中，请等待本轮完成后再发送",
+                                }
+                            )
         except WebSocketDisconnect:
             pass
         except Exception as exc:  # noqa: BLE001 - 连接级兜底，记录后断开
             await websocket.close(code=1011, reason=f"{type(exc).__name__}: {exc}")
+        finally:
+            # 断开/退出时取消仍在运行的轮次，避免权限确认等阻塞点悬挂 worker 线程
+            mgr.request_cancel(session_id)
+            if agent_task is not None:
+                agent_task.cancel()
 
     @app.exception_handler(SessionError)
     async def session_error_handler(_request: Any, exc: SessionError) -> JSONResponse:
@@ -547,6 +746,7 @@ def create_app(
     if dist is not None:
         app.mount("/", StaticFiles(directory=str(dist), html=True), name="webui")
     else:
+
         @app.get("/")
         def index() -> dict[str, str]:
             """前端未构建时的提示。"""

@@ -35,7 +35,7 @@ packages = ["agent_shell"]
 [tool.ruff]
 line-length = 100
 target-version = "py310"
-exclude = [".venv", "build", "dist", "*.egg-info"]
+exclude = [".venv", "build", "dist", "*.egg-info", "scratch", "chinese-novelist"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]

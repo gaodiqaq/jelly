@@ -12,3 +12,11 @@ node_modules/
 *.log
 .DS_Store
 Thumbs.db
+
+# 本地杂物与生成物
+scratch/
+chinese-novelist/
+.pytest_tmp*
+
+# ZCode 本地工作区
+.zcode/

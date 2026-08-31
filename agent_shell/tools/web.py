@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import ipaddress
+import socket
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 from pydantic import BaseModel, Field
@@ -40,6 +43,27 @@ def _truncate(text: str, max_chars: int) -> str:
     return text[:max_chars] + MAX_OUTPUT_MARK
 
 
+def _is_public_host(url: str) -> bool:
+    """校验 URL 主机的所有解析地址均为公网（基础 SSRF 防护）。
+
+    仅做请求前的 DNS 解析检查，不防御 DNS 重绑定。
+
+    Args:
+        url: 目标 URL。
+
+    Returns:
+        全部解析结果为公网地址时 True；解析失败或含保留/内网地址时 False。
+    """
+    host = urlparse(url).hostname
+    if not host:
+        return False
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except OSError:
+        return False
+    return all(ipaddress.ip_address(info[4][0]).is_global for info in infos)
+
+
 def web_fetch(ctx: ToolContext, args: WebFetchArgs) -> ToolResult:
     """抓取 URL 的文本内容。
 
@@ -53,6 +77,11 @@ def web_fetch(ctx: ToolContext, args: WebFetchArgs) -> ToolResult:
         ToolResult: 网页文本；请求失败或内容非法时 ``is_error=True``。
     """
     limit = args.max_chars or ctx.max_output_chars
+    if not _is_public_host(args.url):
+        return ToolResult(
+            content=f"拒绝访问内网/保留地址或无法解析的主机: {args.url}",
+            is_error=True,
+        )
     try:
         response = httpx.get(
             args.url,

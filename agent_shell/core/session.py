@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import secrets
 import shutil
 import tempfile
@@ -18,6 +19,9 @@ from agent_shell.types import Message, SystemMessage
 _MESSAGE_ADAPTER: TypeAdapter[Message] = TypeAdapter(Message)
 
 SESSION_ID_FORMAT = "%Y%m%d-%H%M%S"
+
+# 会话 ID 白名单：防路径遍历（禁止分隔符与 ".." 前缀）
+_SESSION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
 @dataclass
@@ -102,6 +106,10 @@ class Session:
         """
         self.title = title
 
+    def clear_skill(self) -> None:
+        """清除当前激活的 Skill 增强提示词（用户手动关闭技能时调用）。"""
+        self.skill_addon = ""
+
     def snapshot(self, max_chars: int) -> list[Message]:
         """返回裁剪后的消息列表（含系统消息，从最旧开始删除）。
 
@@ -142,13 +150,44 @@ class Session:
             return system
         selected: list[Message] = []
         used = system_size
-        for message in rest:
-            size = len(message.model_dump_json())
+        for group in self._group_messages(rest):
+            size = sum(len(m.model_dump_json()) for m in group)
             if used + size > budget:
                 break
-            selected.append(message)
+            selected.extend(group)
             used += size
         return system + selected
+
+    @staticmethod
+    def _group_messages(messages: list[Message]) -> list[list[Message]]:
+        """按消息分组：assistant 及其全部 tool 结果为一个不可拆分的原子组。
+
+        OpenAI 协议要求 tool 结果紧跟发起调用的 assistant 消息，
+        裁剪时拆散配对会导致下一轮请求被 API 以 400 拒绝。
+
+        Args:
+            messages: 待分组消息。
+
+        Returns:
+            分组后的列表（顺序保持）。
+        """
+        groups: list[list[Message]] = []
+        i = 0
+        while i < len(messages):
+            message = messages[i]
+            i += 1
+            group = [message]
+            if message.role == "assistant" and message.tool_calls:
+                ids = {c.id for c in message.tool_calls}
+                while (
+                    i < len(messages)
+                    and messages[i].role == "tool"
+                    and messages[i].tool_call_id in ids
+                ):
+                    group.append(messages[i])
+                    i += 1
+            groups.append(group)
+        return groups
 
     def save(self) -> Path:
         """原子写入会话文件（首行为元信息，之后每行一条消息）。
@@ -168,6 +207,7 @@ class Session:
                     "updated_at": datetime.now(timezone.utc).isoformat(),
                     "model": self.model,
                     "cwd": str(self.cwd),
+                    "skill_addon": self.skill_addon,
                 },
                 ensure_ascii=False,
             )
@@ -226,6 +266,8 @@ class Session:
             SessionError: 会话不存在或文件损坏。
         """
         path = session_dir / f"{session_id}.jsonl"
+        if not _SESSION_ID_RE.match(session_id):
+            raise SessionError(f"非法会话 ID: {session_id}")
         if not path.is_file():
             raise SessionError(f"会话不存在: {session_id}（文件 {path}）")
         try:
@@ -246,6 +288,7 @@ class Session:
             Path(meta.get("cwd", str(Path.cwd()))),
         )
         session.title = meta.get("title", "")
+        session.skill_addon = meta.get("skill_addon", "")
         for raw in lines[1:]:
             try:
                 session.add_message(_MESSAGE_ADAPTER.validate_json(raw))

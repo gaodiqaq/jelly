@@ -178,9 +178,13 @@ class Agent:
                     stream=self._stream,
                     on_token=self._callbacks.on_token if self._stream else None,
                     on_usage=self._callbacks.on_usage,
+                    cancel_event=self._cancel_event,
                 )
             except LLMError as exc:
                 self._notify_llm_error(exc)
+                raise
+            except AgentInterrupted:
+                self._emit_status("已停止")
                 raise
             if self._stream:
                 self._emit_stream_end()
@@ -190,14 +194,21 @@ class Agent:
             if not reply.tool_calls:
                 return
             if turns >= self._settings.max_turns:
+                self._fill_pending(reply.tool_calls, set(), "已达最大工具轮数，该调用未执行")
                 self._emit_status(
                     f"已达到最大工具轮数（{self._settings.max_turns}），本回合结束，"
                     "请继续输入指令。"
                 )
                 return
             turns += 1
-            for call in reply.tool_calls:
-                self._execute_one(call)
+            executed: set[str] = set()
+            try:
+                for call in reply.tool_calls:
+                    self._execute_one(call)
+                    executed.add(call.id)
+            except AgentInterrupted:
+                self._fill_pending(reply.tool_calls, executed, "用户已停止，该调用未执行")
+                raise
 
     def _execute_one(self, call: ToolCall) -> None:
         """执行单个工具调用并回填结果消息。
@@ -219,6 +230,33 @@ class Agent:
                 is_error=result.is_error,
             )
         )
+
+    def _fill_pending(
+        self,
+        calls: list[ToolCall],
+        executed: set[str],
+        reason: str,
+    ) -> None:
+        """为未执行的 tool_calls 回填占位错误结果，保持消息配对完整。
+
+        OpenAI 协议要求每个 tool_calls 后必须紧跟对应 tool 结果，
+        否则下一轮请求会被 API 以 400 拒绝。
+
+        Args:
+            calls: 本轮模型发起的工具调用。
+            executed: 已回填结果的调用 id 集合。
+            reason: 占位错误文本。
+        """
+        for call in calls:
+            if call.id not in executed:
+                self._session.add_message(
+                    ToolMessage(
+                        tool_call_id=call.id,
+                        name=call.name,
+                        content=reason,
+                        is_error=True,
+                    )
+                )
 
     def _check_cancelled(self) -> None:
         """检查取消事件；已请求停止时抛出 :class:`AgentInterrupted`。"""

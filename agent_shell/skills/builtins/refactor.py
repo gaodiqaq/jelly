@@ -2,16 +2,16 @@
 
 from __future__ import annotations
 
-from agent_shell.skills.base import Skill, SkillResult
+from agent_shell.skills.base import Skill
 
 
 class RefactorSkill(Skill):
     """代码重构：改善代码结构、消除坏味道。"""
-    
+
     name = "refactor"
     triggers = ["/refactor", "/重构", "/cleanup"]
     description = "代码重构：改善代码结构、消除坏味道"
-    
+
     def get_system_addon(self, args: str) -> str:
         target = f"重构目标: {args}" if args else "用户指定的代码区域"
         return f"""

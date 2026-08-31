@@ -88,7 +88,7 @@ def build_todo_specs() -> list[tuple[ToolSpec, type[BaseModel], Any]]:
                     "用清单跟踪计划与进度，并在步骤完成后更新。"
                 ),
                 parameters=TodoAddArgs.model_json_schema(),
-                read_only=False,
+                read_only=True,
             ),
             TodoAddArgs,
             todo_add,
@@ -98,7 +98,7 @@ def build_todo_specs() -> list[tuple[ToolSpec, type[BaseModel], Any]]:
                 name="todo_done",
                 description="将任务清单中的某条事项标记为完成/未完成（按编号）。",
                 parameters=TodoDoneArgs.model_json_schema(),
-                read_only=False,
+                read_only=True,
             ),
             TodoDoneArgs,
             todo_done,

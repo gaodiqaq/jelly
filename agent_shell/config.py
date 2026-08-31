@@ -27,8 +27,8 @@ class PermissionsConfig:
     """权限相关配置。
 
     Attributes:
-        default: 默认权限模式，``ask``（逐个询问）/ ``auto``（全自动）/
-            ``deny``（全部拒绝）。
+        default: 默认权限模式，``ask``（逐个询问）/ ``readonly``（只读放行）/
+            ``auto``（全自动）/ ``deny``（全部拒绝）。
         auto_approve_read_only: 只读工具是否免审批。
     """
 
@@ -263,8 +263,10 @@ def _build_settings(raw: dict, env: dict[str, str], explicit_cwd: Path | None) -
     if not isinstance(permissions_raw, dict):
         raise ConfigError(f"permissions 必须是映射，实际为 {type(permissions_raw).__name__}")
     permission = env.get("AGENT_PERMISSION", permissions_raw.get("default", "ask"))
-    if permission not in ("ask", "auto", "deny"):
-        raise ConfigError(f"permissions.default 必须是 ask/auto/deny 之一，实际为 {permission!r}")
+    if permission not in ("ask", "readonly", "auto", "deny"):
+        raise ConfigError(
+            f"permissions.default 必须是 ask/readonly/auto/deny 之一，实际为 {permission!r}"
+        )
     permissions = PermissionsConfig(
         default=permission,
         auto_approve_read_only=permissions_raw.get("auto_approve_read_only", True),

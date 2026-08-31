@@ -2,12 +2,19 @@
 
 工作线程执行同步的 Agent 循环，事件通过 ``asyncio.Queue`` +
 ``call_soon_threadsafe`` 桥接回事件循环，再经 ``emit`` 回调推给 WebSocket。
+
+权限审批: 手动审批（ask）模式下，worker 线程在工具执行前推
+``ApprovalRequestEvent`` 并阻塞等待；前端通过 ``resolve_approval``
+回填决策（approve/deny/approve_all/deny_all）。等待期间响应取消
+（"停止"按钮或连接断开），超时自动按拒绝处理。
 """
 
 from __future__ import annotations
 
 import asyncio
+import itertools
 import threading
+import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
@@ -20,6 +27,7 @@ from agent_shell.llm.client import LLMClient
 from agent_shell.llm.prompts import build_system_prompt
 from agent_shell.runtime import ProviderStore
 from agent_shell.server.events import (
+    ApprovalRequestEvent,
     DoneEvent,
     ErrorEvent,
     MessageEvent,
@@ -32,8 +40,16 @@ from agent_shell.server.events import (
     UsageEvent,
 )
 from agent_shell.tools import TodoStore, build_registry
+from agent_shell.types import PermissionDecision, ToolCall
 
 Emit = Callable[[ServerEvent], Awaitable[None]]
+
+PERMISSION_MODES = ("readonly", "ask", "auto", "deny")
+
+# 单次权限确认的最长等待秒数；超时按拒绝处理，避免 worker 线程永久悬挂
+_APPROVAL_TIMEOUT = 600.0
+
+_APPROVAL_POLL_INTERVAL = 0.25
 
 
 class SessionManager:
@@ -60,10 +76,64 @@ class SessionManager:
             self._store.seed_from_settings(settings)
         self._llm = llm or LLMClient(settings, self._store)
         self._session_dir = session_dir or settings.session_dir
-        self._locks: dict[str, asyncio.Lock] = {}
+        self._running: set[str] = set()
         self._cancel: dict[str, threading.Event] = {}
         self._todo: dict[str, TodoStore] = {}
         self._sessions: dict[str, Session] = {}
+        # 运行时权限模式（readonly/ask/auto/deny），切换立即对下一轮生效
+        self._permission_mode = settings.permissions.default
+        # 手动审批等待中：session_id -> {"id", "event", "decision"}
+        self._pending_approvals: dict[str, dict[str, Any]] = {}
+        self._approval_seq = itertools.count()
+
+    # ---------- 权限模式 ----------
+
+    @property
+    def permission_mode(self) -> str:
+        """当前权限模式（readonly/ask/auto/deny）。"""
+        return self._permission_mode
+
+    def set_permission_mode(self, mode: str) -> str:
+        """切换权限模式（对后续轮次立即生效）。
+
+        Args:
+            mode: 目标模式。
+
+        Returns:
+            实际生效的模式名。
+
+        Raises:
+            ValueError: 模式名非法。
+        """
+        mode = (mode or "").strip()
+        if mode not in PERMISSION_MODES:
+            raise ValueError(f"权限模式必须是 {'/'.join(PERMISSION_MODES)} 之一，实际为 {mode!r}")
+        self._permission_mode = mode
+        return mode
+
+    def resolve_approval(self, session_id: str, approval_id: str, decision: str) -> bool:
+        """回填一次权限确认的决策并唤醒等待中的 agent 线程。
+
+        Args:
+            session_id: 会话唯一标识。
+            approval_id: 审批请求 ID（须与待决请求一致）。
+            decision: ``approve`` / ``deny`` / ``approve_all`` / ``deny_all``。
+
+        Returns:
+            是否成功匹配并回填（无待决请求或 id 不符返回 False）。
+        """
+        state = self._pending_approvals.get(session_id)
+        if state is None or state["id"] != approval_id:
+            return False
+        mapping = {
+            "approve": PermissionDecision.APPROVE,
+            "deny": PermissionDecision.DENY,
+            "approve_all": PermissionDecision.APPROVE_ALL,
+            "deny_all": PermissionDecision.DENY_ALL,
+        }
+        state["decision"] = mapping.get(decision, PermissionDecision.DENY)
+        state["event"].set()
+        return True
 
     # ---------- 会话生命周期 ----------
 
@@ -75,7 +145,7 @@ class SessionManager:
         """
         model = self._store.model
         system_prompt = self._settings.system_prompt or build_system_prompt(
-            self._settings.cwd, model
+            self._settings.cwd, model, self._skill_catalog()
         )
         session = Session.create(
             self._session_dir,
@@ -87,6 +157,16 @@ class SessionManager:
         self._sessions[session.session_id] = session
         self._todo[session.session_id] = TodoStore()
         return session
+
+    @staticmethod
+    def _skill_catalog() -> list[dict]:
+        """获取当前可用技能清单（注入系统提示词，供模型自主触发）。"""
+        try:
+            from agent_shell.skills.registry import get_global_registry
+
+            return get_global_registry().list_skills()
+        except Exception:
+            return []
 
     def get_session(self, session_id: str) -> Session:
         """按 ID 获取会话（内存优先，否则从磁盘恢复）。
@@ -177,7 +257,7 @@ class SessionManager:
         self.get_session(session_id)
         self._sessions.pop(session_id, None)
         self._todo.pop(session_id, None)
-        self._locks.pop(session_id, None)
+        self._running.discard(session_id)
         self._cancel.pop(session_id, None)
         path = self._session_dir / f"{session_id}.jsonl"
         if path.is_file():
@@ -186,18 +266,21 @@ class SessionManager:
             except OSError as exc:
                 raise SessionError(f"删除会话文件失败 {path}: {exc}") from exc
 
-    def lock(self, session_id: str) -> asyncio.Lock:
-        """获取会话级并发锁（同一会话的多次运行串行化）。
+    def clear_skill(self, session_id: str) -> bool:
+        """清除会话当前激活的 skill（前端"✕"按钮调用）。
 
         Args:
             session_id: 会话唯一标识。
 
         Returns:
-            会话锁。
+            是否清除成功（会话存在且确实有激活的 skill）。
         """
-        if session_id not in self._locks:
-            self._locks[session_id] = asyncio.Lock()
-        return self._locks[session_id]
+        session = self.get_session(session_id)
+        if not session.skill_addon:
+            return False
+        session.clear_skill()
+        session.save()
+        return True
 
     # ---------- 执行 ----------
 
@@ -223,23 +306,44 @@ class SessionManager:
             await emit(ErrorEvent(message=str(exc)))
             await emit(DoneEvent())
             return
-        
+        if session_id in self._running:
+            await emit(ErrorEvent(message="该会话正在运行中，请等待本轮完成后再发送新消息"))
+            await emit(DoneEvent())
+            return
+        self._running.add(session_id)
+        try:
+            await self._run_turn(session_id, session, user_input, emit)
+        finally:
+            self._running.discard(session_id)
+
+    async def _run_turn(
+        self,
+        session_id: str,
+        session: Session,
+        user_input: str,
+        emit: Emit,
+    ) -> None:
+        """执行一轮对话主体（调用方负责会话级互斥）。"""
         # 检测 Skill 命令
         from agent_shell.skills import get_global_registry
+
         registry = get_global_registry()
         skill_result = registry.detect_and_invoke(user_input)
         if skill_result.handled and skill_result.skill_name:
             session.skill_addon = skill_result.system_addon
-            await emit(SkillActivatedEvent(
-                name=skill_result.skill_name,
-                description=skill_result.description,
-            ))
+            await emit(
+                SkillActivatedEvent(
+                    name=skill_result.skill_name,
+                    description=skill_result.description,
+                    resource_dir=skill_result.resource_dir,
+                )
+            )
             # 如果skill处理了输入（无剩余内容），直接返回
             if not skill_result.remaining_input:
                 await emit(DoneEvent())
                 return
             user_input = skill_result.remaining_input
-        
+
         if not session.title and not any(m.role == "user" for m in session.messages):
             session.set_title(user_input.splitlines()[0][:24])
             session.save()
@@ -291,6 +395,36 @@ class SessionManager:
                 )
             )
 
+        def on_approval_request(call: ToolCall, tool_name: str, read_only: bool) -> PermissionDecision:
+            """手动审批桥接：推送确认请求并阻塞 worker 线程等待决策。"""
+
+            approval_id = f"ap-{next(self._approval_seq)}"
+            state = {"id": approval_id, "event": threading.Event(), "decision": None}
+            self._pending_approvals[session_id] = state
+            try:
+                push(
+                    ApprovalRequestEvent(
+                        id=approval_id,
+                        name=call.name,
+                        arguments=call.arguments,
+                        read_only=read_only,
+                    )
+                )
+                deadline = time.monotonic() + _APPROVAL_TIMEOUT
+                while not state["event"].wait(_APPROVAL_POLL_INTERVAL):
+                    if cancel_event.is_set():
+                        # 用户停止 / 连接断开：按拒绝处理，让 agent 走正常收尾
+                        return PermissionDecision.DENY
+                    if time.monotonic() >= deadline:
+                        push(StatusEvent(message="权限确认超时，已自动拒绝本次调用"))
+                        return PermissionDecision.DENY
+                decision = state["decision"] or PermissionDecision.DENY
+                if decision == PermissionDecision.APPROVE_ALL:
+                    push(StatusEvent(message=f"本次会话将始终允许 {call.name}"))
+                return decision
+            finally:
+                self._pending_approvals.pop(session_id, None)
+
         callbacks = AgentCallbacks(
             on_status=on_status,
             on_token=on_token,
@@ -303,7 +437,12 @@ class SessionManager:
 
         def worker() -> None:
             try:
-                agent = self._build_agent(session, callbacks, cancel_event)
+                ask = (
+                    on_approval_request
+                    if self._permission_mode == "ask"
+                    else None
+                )
+                agent = self._build_agent(session, callbacks, cancel_event, ask=ask)
                 agent.run(user_input)
             except AgentInterrupted:
                 push(StatusEvent(message="已停止"))
@@ -339,6 +478,8 @@ class SessionManager:
         session: Session,
         callbacks: AgentCallbacks,
         cancel_event: threading.Event | None = None,
+        *,
+        ask: Callable[[ToolCall, str, bool], PermissionDecision] | None = None,
     ) -> Agent:
         """构建单轮运行的 Agent（每个会话独立工具状态）。
 
@@ -346,6 +487,7 @@ class SessionManager:
             session: 会话实例。
             callbacks: 事件回调。
             cancel_event: 取消事件；Web 端"停止"时置位，Agent 在检查点终止。
+            ask: 手动审批回调（仅 ask 模式传入）；None 时修改性操作按配置处理。
 
         Returns:
             Agent 实例。
@@ -359,8 +501,8 @@ class SessionManager:
         )
         executor = ToolExecutor(
             registry,
-            None,
-            default_permission=self._settings.permissions.default,
+            ask,
+            default_permission=self._permission_mode,
             auto_approve_read_only=self._settings.permissions.auto_approve_read_only,
         )
         return Agent(

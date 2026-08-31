@@ -13,6 +13,7 @@ API Key 与 Base URL，无需重启。修改实时生效，并持久化到用户
 from __future__ import annotations
 
 import os
+import re
 import threading
 from contextlib import suppress
 from dataclasses import dataclass
@@ -24,6 +25,23 @@ import yaml
 from agent_shell.config import DEFAULT_MODEL
 
 USER_CONFIG_PATH = Path.home() / ".agent_shell" / "config.yaml"
+
+# provider 名必须是"提供商前缀"（如 openai / deepseek / dashscope），
+# 不允许包含 "/"（那是模型名格式，如 openai/gpt-4o）
+_PROVIDER_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
+def _validate_provider_name(name: str) -> str:
+    """校验 provider 名：非空、不含斜杠/空白，否则抛 ValueError。"""
+    name = name.strip()
+    if not name:
+        raise ValueError("provider 名不能为空")
+    if not _PROVIDER_NAME_RE.match(name):
+        raise ValueError(
+            f"provider 名非法: {name!r}（应为提供商前缀，如 openai / deepseek，"
+            "不允许包含 '/' 或空白）"
+        )
+    return name
 
 
 @dataclass
@@ -125,6 +143,9 @@ class ProviderStore:
             for name, info in providers.items():
                 if not isinstance(name, str) or not isinstance(info, dict):
                     continue
+                if not _PROVIDER_NAME_RE.match(name):
+                    # 跳过非法 provider 名（历史脏数据，如误存为模型名 dashscope/xxx）
+                    continue
                 api_key = info.get("api_key")
                 api_base = info.get("api_base")
                 default_model = info.get("default_model")
@@ -133,25 +154,24 @@ class ProviderStore:
                     api_key=api_key if isinstance(api_key, str) and api_key else None,
                     api_base=api_base if isinstance(api_base, str) and api_base else None,
                     default_model=(
-                        default_model
-                        if isinstance(default_model, str) and default_model
-                        else None
+                        default_model if isinstance(default_model, str) and default_model else None
                     ),
                 )
 
     def save(self) -> None:
         """将当前 model 与 providers 写回配置文件（POSIX 下 chmod 600）。"""
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        data: dict[str, Any] = {"model": self._model}
-        if self._providers:
-            data["providers"] = {
-                name: {
-                    "api_key": info.api_key,
-                    "api_base": info.api_base,
-                    "default_model": info.default_model,
+        with self._lock:
+            data: dict[str, Any] = {"model": self._model}
+            if self._providers:
+                data["providers"] = {
+                    name: {
+                        "api_key": info.api_key,
+                        "api_base": info.api_base,
+                        "default_model": info.default_model,
+                    }
+                    for name, info in sorted(self._providers.items())
                 }
-                for name, info in sorted(self._providers.items())
-            }
+        self._path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self._path.with_suffix(".tmp")
         with tmp.open("w", encoding="utf-8") as fh:
             yaml.safe_dump(data, fh, allow_unicode=True, sort_keys=False)
@@ -181,6 +201,8 @@ class ProviderStore:
                 if name in self._providers:
                     continue
                 if not isinstance(name, str) or not isinstance(info, dict):
+                    continue
+                if not _PROVIDER_NAME_RE.match(name):
                     continue
                 api_key = info.get("api_key")
                 api_base = info.get("api_base")
@@ -237,6 +259,7 @@ class ProviderStore:
         *,
         api_key: str | None = None,
         api_base: str | None = None,
+        default_model: str | None = None,
     ) -> None:
         """新增或更新提供商凭据（None 表示不改动该字段）。
 
@@ -244,7 +267,12 @@ class ProviderStore:
             name: 提供商名。
             api_key: 新 API Key；None 保持原值。
             api_base: 新 Base URL；None 保持原值。
+            default_model: 该提供商默认模型；None 保持原值。
+
+        Raises:
+            ValueError: provider 名非法（含 '/' 或空白）。
         """
+        name = _validate_provider_name(name)
         with self._lock:
             info = self._providers.get(name) or ProviderInfo(name=name)
             if api_key is not None:
@@ -252,6 +280,8 @@ class ProviderStore:
             if api_base is not None:
                 base = api_base.strip()
                 info.api_base = base or None
+            if default_model is not None:
+                info.default_model = default_model.strip() or None
             self._providers[name] = info
         self.save()
 
@@ -261,6 +291,7 @@ class ProviderStore:
         Returns:
             可对外展示的提供商字典列表。
         """
+
         def sort_key(p: ProviderInfo) -> str:
             return p.name
 

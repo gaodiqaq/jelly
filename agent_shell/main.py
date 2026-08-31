@@ -32,6 +32,17 @@ from agent_shell.ui.console import _error_tolerant, create_console
 from agent_shell.ui.prompt import ask_permission, print_help, read_input
 from agent_shell.ui.renderer import Renderer
 
+
+def _skill_catalog() -> list[dict]:
+    """获取当前可用技能清单（注入系统提示词，供模型自主触发）。"""
+    try:
+        from agent_shell.skills.registry import get_global_registry
+
+        return get_global_registry().list_skills()
+    except Exception:
+        return []
+
+
 app = typer.Typer(
     add_completion=False,
     no_args_is_help=True,
@@ -85,7 +96,7 @@ def _build_agent(
     session_model = store.model
     if session is None:
         system_prompt = settings.system_prompt or build_system_prompt(
-            settings.cwd, session_model
+            settings.cwd, session_model, _skill_catalog()
         )
         session = Session.create(
             settings.session_dir,
@@ -276,11 +287,45 @@ def _repl(
             _handle_command(text, agent, renderer, console, settings, store)
             continue
         try:
+            text = _maybe_invoke_skill(text, agent, renderer)
+            if text is None:
+                continue
             agent.run(text)
         except AgentInterrupted:
             renderer.info("任务已中断")
         except LLMError:
             renderer.info("模型调用失败，本回合已结束（会话已保存）")
+
+
+def _maybe_invoke_skill(
+    text: str,
+    agent: Agent,
+    renderer: Renderer,
+) -> str | None:
+    """检测并激活匹配的 skill（CLI 侧），返回处理后的剩余输入。
+
+    Args:
+        text: 用户原始输入。
+        agent: Agent 实例。
+        renderer: 渲染器。
+
+    Returns:
+        去除触发词后的输入；skill 已自行处理完毕（无剩余输入）时返回 None
+        （调用方跳过本轮）。
+    """
+    from agent_shell.skills import get_global_registry
+
+    result = get_global_registry().detect_and_invoke(text)
+    if not (result.handled and result.skill_name):
+        return text
+    agent.session.skill_addon = result.system_addon
+    renderer.info(
+        f"已激活 Skill「{result.skill_name}」: {result.description}"
+        + (f"\n  资源目录: {result.resource_dir}" if result.resource_dir else "")
+    )
+    if not result.remaining_input:
+        return None
+    return result.remaining_input
 
 
 def _handle_command(
@@ -315,7 +360,7 @@ def _handle_command(
         system_content = (
             agent.session.messages[0].content
             if agent.session.messages
-            else build_system_prompt(agent.session.cwd, agent.session.model)
+            else build_system_prompt(agent.session.cwd, agent.session.model, _skill_catalog())
         )
         new_session = Session.create(
             agent.session.session_dir,
@@ -352,6 +397,8 @@ def _handle_command(
     elif command == "/tools":
         names = ", ".join(spec.name for spec in agent.executor.registry.specs())
         renderer.info(f"可用工具: {names}")
+    elif command == "/skills":
+        _print_skills(console)
     else:
         console.print(f"[red]未知命令: {command}[/red]（/help 查看帮助）")
 
@@ -404,7 +451,9 @@ def _handle_baseurl(argument: str, renderer: Renderer, agent: Agent) -> None:
     """
     parts = argument.split(maxsplit=1)
     if len(parts) < 2:
-        renderer.info("用法: /baseurl <提供商> <URL>（如 /baseurl deepseek https://api.deepseek.com）")
+        renderer.info(
+            "用法: /baseurl <提供商> <URL>（如 /baseurl deepseek https://api.deepseek.com）"
+        )
         return
     agent.llm.set_api_base(parts[0].lower(), parts[1])
     renderer.info(f"{parts[0].lower()} 的 Base URL 已更新")
@@ -478,7 +527,7 @@ def list_sessions() -> None:
             f"  {meta.session_id}  {meta.updated_at[:19]}  "
             f"{meta.message_count} 条消息  {meta.model}  [dim]{meta.cwd}[/dim]"
         )
-        console.print(f"    恢复: agent --session {meta.session_id}")
+        console.print(f"    恢复: agent run --session {meta.session_id}")
 
 
 @app.command("web")
@@ -486,20 +535,22 @@ def serve_web(
     host: Annotated[str, typer.Option("--host", "-h", help="监听地址")] = "127.0.0.1",
     port: Annotated[int, typer.Option("--port", "-p", help="监听端口")] = 8000,
 ) -> None:
-    """启动 Web 服务（多用户浏览器界面，可选 AGENT_WEB_TOKEN 认证）。"""
+    """启动 Web 服务（多用户浏览器界面，可选 AGENT_WEB_TOKEN / AGENT_WEB_USERS 认证）。"""
     _load_dotenv_files()
     try:
         settings = load_settings()
     except ConfigError as exc:
         _print_fatal(f"配置错误: {exc}")
         raise typer.Exit(code=1) from exc
-    token = os.environ.get("AGENT_WEB_TOKEN")
     console = create_console()
-    if not token:
-        console.print("[yellow]警告: 未设置 AGENT_WEB_TOKEN，以无认证模式启动（仅限互信网络）[/yellow]")
+    if not os.environ.get("AGENT_WEB_TOKEN") and not os.environ.get("AGENT_WEB_USERS"):
+        console.print(
+            "[yellow]警告: 未设置 AGENT_WEB_TOKEN/AGENT_WEB_USERS，"
+            "以无认证模式启动（仅限互信网络）[/yellow]"
+        )
     from agent_shell.server.app import create_app
 
-    application = create_app(settings, api_token=token)
+    application = create_app(settings)
     console.print(
         f"[bold green]Web 服务已启动:[/bold green] http://{host}:{port}  "
         f"[dim](模型: {settings.model}, 工作目录: {settings.cwd})[/dim]"
@@ -514,3 +565,107 @@ def version() -> None:
     """显示版本号。"""
     console = create_console()
     console.print(f"果冻 {__version__}")
+
+
+# ===========================================================================
+# agent skills 命令组：list / install / remove / reload
+# ===========================================================================
+
+
+@app.command("skills")
+def skills_cmd(
+    action: Annotated[
+        str,
+        typer.Argument(help="操作: list / install / remove / reload"),
+    ] = "list",
+    target: Annotated[
+        str | None,
+        typer.Argument(help="install 的 GitHub 仓库/URL/本地路径，或 remove 的 skill 名"),
+    ] = None,
+) -> None:
+    """管理 Skills：列出、安装（GitHub 仓库/URL/本地路径）、卸载、热重载。"""
+    _load_dotenv_files()
+    console = create_console()
+    action = action.lower()
+
+    if action == "list":
+        _print_skills(console)
+    elif action == "install":
+        if not target:
+            console.print("[red]用法: agent skills install <GitHub仓库|URL|本地路径>[/red]")
+            raise typer.Exit(code=1)
+        _install_skill(console, target)
+    elif action == "remove":
+        if not target:
+            console.print("[red]用法: agent skills remove <skill名>[/red]")
+            raise typer.Exit(code=1)
+        _remove_skill(console, target)
+    elif action == "reload":
+        _reload_skills(console)
+    else:
+        console.print(f"[red]未知操作: {action}[/red]（支持 list / install / remove / reload）")
+        raise typer.Exit(code=1)
+
+
+def _print_skills(console: Console) -> None:
+    """列出全部可用 skills（内置 + 用户安装）。"""
+    from agent_shell.skills import list_skills
+    from agent_shell.skills.installer import list_installed
+
+    skills = list_skills()
+    if not skills:
+        console.print("[dim]暂无可用 skills[/dim]")
+    else:
+        console.print(f"[bold]共 {len(skills)} 个 skills:[/bold]")
+        for s in skills:
+            is_markdown = s.get("type") == "markdown"
+            type_tag = "[cyan]声明式[/cyan]" if is_markdown else "[green]内置[/green]"
+            triggers = " / ".join(s.get("triggers") or [])
+            console.print(f"  {type_tag} [bold]{s['name']}[/bold]  {s.get('description', '')[:60]}")
+            if triggers:
+                console.print(f"      触发: {triggers}")
+    installed = list_installed()
+    if installed:
+        console.print(f"\n[bold]已安装用户 skills（{len(installed)}）:[/bold]")
+        for item in installed:
+            res = "（含资源文件）" if item.get("has_resources") else ""
+            console.print(f"  [bold]{item['name']}[/bold]  {item['path']} {res}")
+
+
+def _install_skill(console: Console, source: str) -> None:
+    """安装 skill 并热重载注册表。"""
+    from agent_shell.skills.installer import install_skill_from_url
+    from agent_shell.skills.registry import reload_global_registry
+
+    console.print(f"正在安装: {source} …")
+    try:
+        definition = install_skill_from_url(source)
+    except ValueError as exc:
+        console.print(f"[red]安装失败:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+    count = reload_global_registry()
+    console.print(f"[bold green]安装成功:[/bold green] {definition.name}")
+    console.print(f"  描述: {definition.description[:80]}")
+    console.print(f"  触发: {' / '.join(definition.normalize_triggers())}")
+    console.print(f"  当前共 {count} 个 skills 可用")
+
+
+def _remove_skill(console: Console, name: str) -> None:
+    """卸载 skill 并热重载注册表。"""
+    from agent_shell.skills.installer import uninstall_skill
+    from agent_shell.skills.registry import reload_global_registry
+
+    if uninstall_skill(name):
+        count = reload_global_registry()
+        console.print(f"[bold green]已卸载:[/bold green] {name}（当前 {count} 个 skills 可用）")
+    else:
+        console.print(f"[red]未找到 skill: {name}[/red]（用 agent skills list 查看）")
+        raise typer.Exit(code=1)
+
+
+def _reload_skills(console: Console) -> None:
+    """热重载全部 skills。"""
+    from agent_shell.skills.registry import reload_global_registry
+
+    count = reload_global_registry()
+    console.print(f"[bold green]已热重载，当前 {count} 个 skills 可用[/bold green]")

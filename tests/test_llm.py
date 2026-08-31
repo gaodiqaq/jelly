@@ -6,7 +6,7 @@ import pytest
 from litellm import exceptions as litellm_exc
 
 from agent_shell.errors import LLMError
-from agent_shell.llm.client import LLMClient
+from agent_shell.llm.client import LLMClient, is_private_base
 from agent_shell.types import (
     AssistantMessage,
     SystemMessage,
@@ -127,3 +127,24 @@ def test_map_error_unknown_exception() -> None:
     mapped = LLMClient._map_error(RuntimeError("boom"))
     assert isinstance(mapped, LLMError)
     assert "RuntimeError" in str(mapped)
+
+
+def test_map_error_bad_gateway_is_retryable() -> None:
+    """502 网关错误映射为可重试的服务不可用提示（不再落入"未预期"兜底）。"""
+    error = litellm_exc.BadGatewayError(
+        "bad gateway", llm_provider="openai", model="openai/gpt-4o-mini"
+    )
+    mapped = LLMClient._map_error(error)
+    assert isinstance(mapped, LLMError)
+    assert "暂时不可用" in str(mapped)
+    assert mapped.retryable is True
+
+
+def test_is_private_base_ip_literals() -> None:
+    """内网/环回 api_base 识别（IP 字面量，不依赖 DNS）。"""
+    assert is_private_base("http://127.0.0.1:8000/v1")
+    assert is_private_base("http://192.168.19.238:8000/v1")
+    assert is_private_base("http://10.0.0.5:8000")
+    assert is_private_base("http://localhost:8000/v1")
+    assert not is_private_base("http://8.8.8.8/v1")
+    assert not is_private_base("")

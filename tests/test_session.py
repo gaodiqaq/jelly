@@ -8,7 +8,7 @@ import pytest
 
 from agent_shell.core.session import Session
 from agent_shell.errors import SessionError
-from agent_shell.types import AssistantMessage, ToolCall, UserMessage
+from agent_shell.types import AssistantMessage, ToolCall, ToolMessage, UserMessage
 
 
 @pytest.fixture()
@@ -105,3 +105,31 @@ def test_snapshot_keeps_all_within_budget(session_dir: Path) -> None:
     session.add_message(UserMessage(content="hi"))
     snapshot = session.snapshot(10**6)
     assert len(snapshot) == 2
+
+
+def test_snapshot_keeps_tool_pairing_atomic(session_dir: Path) -> None:
+    """裁剪以 assistant+tool 结果为原子组，不产生孤儿 tool_calls。"""
+    session = _build_session(session_dir)
+    session.add_message(UserMessage(content="第一个问题"))
+    session.add_message(
+        AssistantMessage(
+            content=None,
+            tool_calls=[ToolCall(id="c1", name="bash", arguments={"command": "echo hi"})],
+        )
+    )
+    session.add_message(ToolMessage(tool_call_id="c1", name="bash", content="hi"))
+    session.add_message(UserMessage(content="第二个问题，请继续" + "y" * 60))
+    # 预算只够 system + 前三条消息，装不下最后一条 user
+    budget = sum(len(m.model_dump_json()) for m in session.messages[:3]) + 10
+    snapshot = session.snapshot(budget)
+    for i, message in enumerate(snapshot):
+        if message.role == "assistant" and message.tool_calls:
+            ids = {c.id for c in message.tool_calls}
+            paired = [m for m in snapshot[i + 1 :] if m.role == "tool" and m.tool_call_id in ids]
+            assert len(paired) == len(ids), "tool_calls 与 tool 结果被裁剪拆散"
+
+
+def test_resume_rejects_traversal_id(session_dir: Path) -> None:
+    """非法会话 ID（路径遍历）直接拒绝。"""
+    with pytest.raises(SessionError, match="非法会话 ID"):
+        Session.resume(session_dir, "../evil")

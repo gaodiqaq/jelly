@@ -21,7 +21,7 @@ class ScriptedLLM:
         self._replies = list(replies)
         self.model = "scripted"
 
-    def complete(self, messages, tools=None, *, stream=True, on_token=None):
+    def complete(self, messages, tools=None, *, stream=True, on_token=None, **_):
         reply = self._replies.pop(0)
         if on_token is not None and reply.content:
             on_token(reply.content)
@@ -289,3 +289,129 @@ def test_delete_session_after_chat(client: TestClient) -> None:
                 break
     assert client.delete(f"/api/sessions/{session_id}").status_code == 200
     assert client.get(f"/api/sessions/{session_id}/messages").status_code == 404
+
+
+# ---------- 权限模式与手动审批 ----------
+
+
+def ask_mode_settings(tmp_path: Path) -> Settings:
+    """手动审批模式的隔离配置。"""
+    return Settings(
+        model="scripted-model",
+        session_dir=tmp_path / "sessions",
+        cwd=tmp_path,
+        permissions=PermissionsConfig(default="ask", auto_approve_read_only=True),
+        max_turns=5,
+    )
+
+
+def test_permissions_get_and_put(settings: Settings) -> None:
+    """GET/PUT /api/permissions 往返切换，非法模式 400。"""
+    client = make_client(settings, [AssistantMessage(content="ok")])
+    assert client.get("/api/permissions").json()["mode"] == "auto"
+
+    resp = client.put("/api/permissions", json={"mode": "ask"})
+    assert resp.status_code == 200
+    assert resp.json()["mode"] == "ask"
+    assert client.get("/api/permissions").json()["mode"] == "ask"
+
+    assert client.put("/api/permissions", json={"mode": "yolo"}).status_code == 400
+    assert client.put("/api/permissions", json={"mode": "readonly"}).status_code == 200
+
+
+def make_approval_client(settings: Settings, decision_reply: str) -> TestClient:
+    """ask 模式 + bash 工具调用脚本的客户端。"""
+    replies = [
+        AssistantMessage(
+            content=None,
+            tool_calls=[
+                ToolCall(id="c1", name="bash", arguments={"command": "echo web-ok"})
+            ],
+        ),
+        AssistantMessage(content=decision_reply),
+    ]
+    return make_client(settings, replies)
+
+
+def _receive_until(ws, wanted: str) -> dict:
+    """持续接收事件直到指定类型出现（已收到的其他事件一并返回）。"""
+    while True:
+        event = ws.receive_json()
+        if event["type"] == wanted:
+            return event
+
+
+def test_websocket_approval_flow_approve(tmp_path: Path) -> None:
+    """手动审批：批准后工具真正执行并回填结果。"""
+    client = make_approval_client(ask_mode_settings(tmp_path), "已批准执行")
+    session_id = client.post("/api/sessions").json()["session_id"]
+    with client.websocket_connect(f"/ws/{session_id}") as ws:
+        ws.send_json({"type": "user_message", "content": "执行命令"})
+        request = _receive_until(ws, "approval_request")
+        assert request["name"] == "bash"
+        assert request["arguments"] == {"command": "echo web-ok"}
+        assert request["read_only"] is False
+        ws.send_json(
+            {"type": "approval_decision", "id": request["id"], "decision": "approve"}
+        )
+        result = _receive_until(ws, "tool_result")
+        assert not result["is_error"]
+        assert "web-ok" in result["content"]
+        assert _receive_until(ws, "done")["type"] == "done"
+
+
+def test_websocket_approval_flow_deny(tmp_path: Path) -> None:
+    """手动审批：拒绝后工具返回错误结果，轮次正常结束。"""
+    client = make_approval_client(ask_mode_settings(tmp_path), "收到，已跳过")
+    session_id = client.post("/api/sessions").json()["session_id"]
+    with client.websocket_connect(f"/ws/{session_id}") as ws:
+        ws.send_json({"type": "user_message", "content": "执行命令"})
+        request = _receive_until(ws, "approval_request")
+        ws.send_json(
+            {"type": "approval_decision", "id": request["id"], "decision": "deny"}
+        )
+        result = _receive_until(ws, "tool_result")
+        assert result["is_error"]
+        assert "拒绝" in result["content"]
+        assert _receive_until(ws, "done")["type"] == "done"
+
+
+def test_websocket_approval_approve_all_skips_later_asks(tmp_path: Path) -> None:
+    """approve_all 后同名工具不再询问（脚本含两次 bash 调用）。"""
+    replies = [
+        AssistantMessage(
+            content=None,
+            tool_calls=[ToolCall(id="c1", name="bash", arguments={"command": "echo one"})],
+        ),
+        AssistantMessage(
+            content=None,
+            tool_calls=[ToolCall(id="c2", name="bash", arguments={"command": "echo two"})],
+        ),
+        AssistantMessage(content="完成"),
+    ]
+    client = make_client(ask_mode_settings(tmp_path), replies)
+    session_id = client.post("/api/sessions").json()["session_id"]
+    with client.websocket_connect(f"/ws/{session_id}") as ws:
+        ws.send_json({"type": "user_message", "content": "执行两次"})
+        request = _receive_until(ws, "approval_request")
+        ws.send_json(
+            {"type": "approval_decision", "id": request["id"], "decision": "approve_all"}
+        )
+        first = _receive_until(ws, "tool_result")
+        assert "one" in first["content"]
+        second = _receive_until(ws, "tool_result")
+        assert "two" in second["content"]
+        assert _receive_until(ws, "done")["type"] == "done"
+
+
+def test_websocket_approval_decision_without_pending(settings: Settings) -> None:
+    """无待决请求时发送决策返回错误事件，不中断连接。"""
+    client = make_client(settings, [AssistantMessage(content="ok")])
+    session_id = client.post("/api/sessions").json()["session_id"]
+    with client.websocket_connect(f"/ws/{session_id}") as ws:
+        ws.send_json(
+            {"type": "approval_decision", "id": "ap-none", "decision": "approve"}
+        )
+        event = ws.receive_json()
+        assert event["type"] == "error"
+        assert "审批" in event["message"]

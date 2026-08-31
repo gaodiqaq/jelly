@@ -115,3 +115,14 @@ def test_set_model_rejects_empty(tmp_path: Path) -> None:
     store = ProviderStore(tmp_path / "runtime.yaml")
     with pytest.raises(ValueError):
         store.set_model("   ")
+
+
+def test_upsert_provider_default_model(tmp_path: Path) -> None:
+    """default_model 可写入并持久化（Web add_provider 接口依赖）。"""
+    path = tmp_path / "runtime.yaml"
+    store = ProviderStore(path)
+    store.upsert_provider("openai", default_model="gpt-4o-mini")
+    assert store.get_provider("openai").default_model == "gpt-4o-mini"
+
+    reloaded = ProviderStore(path)
+    assert reloaded.get_provider("openai").default_model == "gpt-4o-mini"

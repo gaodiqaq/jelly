@@ -18,12 +18,12 @@ def executor(tmp_path: Path) -> ToolExecutor:
     return ToolExecutor(registry, None)
 
 
-def test_auto_approve_when_no_ask_callback(tmp_path: Path) -> None:
-    """无询问回调时直接放行（等价 auto）。"""
+def test_no_ask_callback_denies_mutation(tmp_path: Path) -> None:
+    """无询问回调时 fail-closed：修改性工具被拒（无审批渠道的兜底）。"""
     registry = build_registry(cwd=tmp_path)
     executor = ToolExecutor(registry, None)
     result = executor.execute(ToolCall(id="c1", name="bash", arguments={"command": "echo hi"}))
-    assert not result.is_error
+    assert result.is_error
 
 
 def test_read_only_auto_approved_in_ask_mode(tmp_path: Path) -> None:
@@ -98,6 +98,29 @@ def test_default_deny_mode(tmp_path: Path) -> None:
     executor = ToolExecutor(registry, None, default_permission="deny")
     result = executor.execute(ToolCall(id="c1", name="ls", arguments={"path": "."}))
     assert result.is_error
+
+
+def test_readonly_mode_allows_read_only_tools(tmp_path: Path) -> None:
+    """readonly 模式下只读工具直接放行。"""
+    registry = build_registry(cwd=tmp_path)
+    executor = ToolExecutor(registry, None, default_permission="readonly")
+    result = executor.execute(ToolCall(id="c1", name="ls", arguments={"path": "."}))
+    assert not result.is_error
+
+
+def test_readonly_mode_denies_mutation_without_asking(tmp_path: Path) -> None:
+    """readonly 模式下修改性工具直接拒绝，不进入询问回调。"""
+    asked: list[str] = []
+
+    def ask(call, name, read_only) -> PermissionDecision:
+        asked.append(name)
+        return PermissionDecision.APPROVE
+
+    registry = build_registry(cwd=tmp_path)
+    executor = ToolExecutor(registry, ask, default_permission="readonly")
+    result = executor.execute(ToolCall(id="c1", name="bash", arguments={"command": "echo x"}))
+    assert result.is_error
+    assert asked == []
 
 
 def test_enable_and_disable_auto(tmp_path: Path) -> None:

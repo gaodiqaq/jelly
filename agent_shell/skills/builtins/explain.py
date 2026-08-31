@@ -2,16 +2,16 @@
 
 from __future__ import annotations
 
-from agent_shell.skills.base import Skill, SkillResult
+from agent_shell.skills.base import Skill
 
 
 class ExplainSkill(Skill):
     """代码解释：解释代码功能、逻辑、架构。"""
-    
+
     name = "explain"
     triggers = ["/explain", "/解释", "/what", "/how"]
     description = "代码解释：解释代码功能、逻辑、架构"
-    
+
     def get_system_addon(self, args: str) -> str:
         target = f"解释目标: {args}" if args else "用户查看的代码或概念"
         return f"""

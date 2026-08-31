@@ -37,19 +37,53 @@ DEFAULT_SYSTEM_PROMPT = """\
 """
 
 
-def build_system_prompt(cwd: Path, model: str) -> str:
-    """构建默认系统提示词（含环境信息）。
+def build_system_prompt(cwd: Path, model: str, skills: list[dict] | None = None) -> str:
+    """构建默认系统提示词（含环境信息与可用技能清单）。
 
     Args:
         cwd: 当前工作目录。
         model: 当前模型名。
+        skills: 可用技能列表（[{name, description, triggers}]）；
+            提供时追加"可用技能"段落，模型可根据用户意图自主激活。
 
     Returns:
         完整系统提示词文本。
     """
-    return DEFAULT_SYSTEM_PROMPT.format(
+    prompt = DEFAULT_SYSTEM_PROMPT.format(
         cwd=cwd,
         os=platform.platform(),
         today=date.today().isoformat(),
         model=model,
     )
+    if skills:
+        prompt += build_skill_catalog(skills)
+    return prompt
+
+
+def build_skill_catalog(skills: list[dict]) -> str:
+    """构建技能清单段落（注入系统提示词，供模型自主触发）。
+
+    Args:
+        skills: 技能列表（[{name, description, triggers, resource_dir}]）。
+
+    Returns:
+        "## 可用技能" markdown 段落。
+    """
+    lines = ["\n## 可用技能（Skills）\n"]
+    lines.append(
+        "当用户请求与下列技能匹配时，先激活该技能：用 read 工具读取其"
+        "SKILL.md（及 references/ 辅助文档），然后严格按其指令执行。"
+    )
+    for s in skills:
+        name = s.get("name", "")
+        desc = s.get("description", "")
+        triggers = s.get("triggers") or []
+        resource_dir = s.get("resource_dir", "")
+        lines.append(f"\n### {name}")
+        if desc:
+            lines.append(desc)
+        if triggers:
+            lines.append(f"- 触发词: {' / '.join(triggers)}")
+        if resource_dir:
+            lines.append(f"- 技能文件: {resource_dir}/SKILL.md")
+    return "\n".join(lines)

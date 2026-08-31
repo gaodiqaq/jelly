@@ -2,6 +2,7 @@
 
 权限模式（由配置与用户交互共同决定）:
 - ``ask``: 修改性工具逐个询问用户；只读工具按配置免审批
+- ``readonly``: 只读工具放行，修改性工具直接拒绝（不询问）
 - ``auto``: 全部免审批
 - ``deny``: 全部拒绝
 
@@ -18,7 +19,10 @@ from agent_shell.types import PermissionDecision, ToolCall, ToolResult
 
 PermissionAsk = Callable[[ToolCall, str, bool], PermissionDecision]
 
-_DENY_MESSAGE = "工具调用被用户拒绝（该结果已回传模型，可尝试其他方案或征询用户）"
+_DENY_MESSAGE = (
+    "工具调用被拒绝（用户拒绝，或当前环境没有审批渠道；"
+    "如需全自动执行请设置 permissions.default=auto）"
+)
 
 
 class ToolExecutor:
@@ -27,7 +31,7 @@ class ToolExecutor:
     Args:
         registry: 已注册的工具表。
         ask: 权限询问回调（由 ui 层提供）；None 表示不询问。
-        default_permission: 初始权限模式，``ask`` / ``auto`` / ``deny``。
+        default_permission: 初始权限模式，``ask`` / ``readonly`` / ``auto`` / ``deny``。
         auto_approve_read_only: 只读工具是否免审批。
     """
 
@@ -41,6 +45,7 @@ class ToolExecutor:
     ) -> None:
         self._registry = registry
         self._ask = ask
+        self._mode = default_permission
         self._auto = default_permission == "auto"
         self._deny_all = default_permission == "deny"
         self._auto_approve_read_only = auto_approve_read_only
@@ -101,12 +106,15 @@ class ToolExecutor:
             return PermissionDecision.DENY
         if self._auto:
             return PermissionDecision.APPROVE
+        if self._mode == "readonly":
+            return PermissionDecision.APPROVE if read_only else PermissionDecision.DENY
         if read_only and self._auto_approve_read_only:
             return PermissionDecision.APPROVE
         if call.name in self._approved_all:
             return PermissionDecision.APPROVE
         if self._ask is None:
-            return PermissionDecision.APPROVE
+            # fail-closed：没有审批渠道（如 Web 端未实现交互）时拒绝修改性操作
+            return PermissionDecision.DENY
         decision = self._ask(call, call.name, read_only)
         if decision == PermissionDecision.APPROVE_ALL:
             self._approved_all.add(call.name)

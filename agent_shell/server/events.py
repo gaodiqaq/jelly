@@ -66,6 +66,7 @@ class SkillActivatedEvent(BaseModel):
     type: Literal["skill_activated"] = "skill_activated"
     name: str
     description: str
+    resource_dir: str = ""
 
 
 class ErrorEvent(BaseModel):
@@ -98,6 +99,22 @@ class UsageEvent(BaseModel):
     model: str = ""
 
 
+class ApprovalRequestEvent(BaseModel):
+    """手动审批模式下的权限确认请求（agent 已暂停，等待用户决策）。
+
+    前端应以 ``approval_decision`` 消息回填同 id 的决策；
+    超时或用户停止时服务端自动按拒绝处理。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["approval_request"] = "approval_request"
+    id: str
+    name: str
+    arguments: dict[str, Any] = Field(default_factory=dict)
+    read_only: bool = False
+
+
 ServerEvent = Annotated[
     (
         StatusEvent
@@ -105,9 +122,11 @@ ServerEvent = Annotated[
         | ToolCallEvent
         | ToolResultEvent
         | MessageEvent
+        | SkillActivatedEvent
         | ErrorEvent
         | DoneEvent
         | UsageEvent
+        | ApprovalRequestEvent
     ),
     Field(discriminator="type"),
 ]
@@ -130,7 +149,24 @@ class StopMessage(BaseModel):
     type: Literal["stop"] = "stop"
 
 
-ClientEvent = Annotated[ClientMessage | StopMessage, Field(discriminator="type")]
+class ApprovalDecisionMessage(BaseModel):
+    """客户端对一次权限确认请求的决策。
+
+    decision 语义与终端一致：approve/deny 只影响本次调用，
+    approve_all/deny_all 对本次会话内同名工具持续生效。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["approval_decision"] = "approval_decision"
+    id: str = Field(min_length=1)
+    decision: Literal["approve", "deny", "approve_all", "deny_all"]
+
+
+ClientEvent = Annotated[
+    ClientMessage | StopMessage | ApprovalDecisionMessage,
+    Field(discriminator="type"),
+]
 
 
 __all__ = [
@@ -143,7 +179,9 @@ __all__ = [
     "ErrorEvent",
     "DoneEvent",
     "UsageEvent",
+    "ApprovalRequestEvent",
     "ClientMessage",
     "StopMessage",
+    "ApprovalDecisionMessage",
     "ClientEvent",
 ]

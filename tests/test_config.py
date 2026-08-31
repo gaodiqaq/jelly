@@ -10,9 +10,18 @@ from agent_shell.config import DEFAULT_MODEL, _build_settings, load_settings
 from agent_shell.errors import ConfigError
 
 
+@pytest.fixture(autouse=True)
+def _isolate_agent_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """隔离宿主环境变量与配置文件，保证测试只测被声明的输入。"""
+    for name in ("AGENT_MODEL", "AGENT_PERMISSION", "AGENT_CWD", "AGENT_MAX_TURNS"):
+        monkeypatch.delenv(name, raising=False)
+    # 让 cwd 与家目录下的候选配置文件（agent_shell.yaml、~/.agent_shell/config.yaml）落空
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+
+
 def test_load_settings_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     """无配置文件、无环境变量时使用默认值。"""
-    monkeypatch.delenv("AGENT_MODEL", raising=False)
     settings = load_settings()
     assert settings.model == DEFAULT_MODEL
     assert settings.permissions.default == "ask"
@@ -68,8 +77,16 @@ def test_load_settings_invalid_permission(tmp_path: Path) -> None:
     """非法的权限模式抛 ConfigError。"""
     config = tmp_path / "agent_shell.yaml"
     config.write_text("permissions:\n  default: maybe\n", encoding="utf-8")
-    with pytest.raises(ConfigError, match="ask/auto/deny"):
+    with pytest.raises(ConfigError, match="ask/readonly/auto/deny"):
         load_settings(config_path=config)
+
+
+def test_load_settings_readonly_permission(tmp_path: Path) -> None:
+    """readonly 是合法的权限模式。"""
+    config = tmp_path / "agent_shell.yaml"
+    config.write_text("permissions:\n  default: readonly\n", encoding="utf-8")
+    settings = load_settings(config_path=config)
+    assert settings.permissions.default == "readonly"
 
 
 def test_load_settings_invalid_yaml(tmp_path: Path) -> None:
@@ -97,7 +114,7 @@ def test_build_settings_invalid_max_turns() -> None:
 def test_settings_cwd_expansion() -> None:
     """cwd 自动扩展为用户绝对路径。"""
     settings = _build_settings({}, {"AGENT_CWD": "~"}, None)
-    assert settings.cwd == Path.home().resolve()
+    assert settings.cwd == Path("~").expanduser().resolve()
 
 
 def test_auto_permission_forces_read_only_auto_approve() -> None:

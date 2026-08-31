@@ -2,16 +2,16 @@
 
 from __future__ import annotations
 
-from agent_shell.skills.base import Skill, SkillResult
+from agent_shell.skills.base import Skill
 
 
 class FixSkill(Skill):
     """Bug修复：分析错误并给出修复方案。"""
-    
+
     name = "fix"
     triggers = ["/fix", "/修复", "/bugfix", "/debug"]
     description = "Bug修复：分析错误并给出修复方案"
-    
+
     def get_system_addon(self, args: str) -> str:
         bug_desc = f"问题描述: {args}" if args else "用户会提供错误信息或异常堆栈"
         return f"""
@@ -31,7 +31,7 @@ class FixSkill(Skill):
 
 ### 注意事项
 
-- 修复前先用 fs_read 确认当前代码状态
-- 修改代码时使用 fs_write，保持最小改动
+- 修复前先用 read 工具确认当前代码状态
+- 修改代码时使用 write / edit 工具，保持最小改动
 - 修复完成后运行相关测试验证
 """
