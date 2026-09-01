@@ -391,6 +391,8 @@ def _handle_command(
     elif command == "/ask":
         agent.executor.disable_auto()
         renderer.info("已切回逐个询问模式")
+    elif command == "/cwd":
+        _handle_cwd(argument, agent, renderer, settings, store)
     elif command == "/session":
         renderer.info(f"会话 ID: {agent.session.session_id}")
         renderer.info(f"文件: {agent.session.file_path}")
@@ -401,6 +403,51 @@ def _handle_command(
         _print_skills(console)
     else:
         console.print(f"[red]未知命令: {command}[/red]（/help 查看帮助）")
+
+
+def _handle_cwd(
+    argument: str,
+    agent: Agent,
+    renderer: Renderer,
+    settings: Settings,
+    store: ProviderStore,
+) -> None:
+    """处理 /cwd 命令：切换当前工作区并持久化。
+
+    Args:
+        argument: 目标工作目录路径（空表示查看当前）。
+        agent: Agent 实例。
+        renderer: 渲染器。
+        settings: 全局配置。
+        store: 运行时配置存储。
+    """
+    if not argument:
+        renderer.info(f"当前工作目录: {settings.cwd}")
+        return
+    target = Path(argument).expanduser()
+    if not target.is_absolute():
+        target = settings.cwd / target
+    target = target.resolve()
+    if not target.is_dir():
+        renderer.info(f"[red]工作目录不存在: {target}[/red]")
+        return
+    # 1. 全局配置
+    settings.cwd = target
+    store.set_cwd(str(target))
+    # 2. 工具注册表（本轮 REPL 内立即生效）
+    agent.executor.registry.set_cwd(target)
+    # 3. 会话工作目录 + 系统提示词更新（保留历史与 skill 增强）
+    agent.session.cwd = target
+    skill_addon = agent.session.skill_addon
+    system_content = settings.system_prompt or build_system_prompt(
+        target, agent.session.model, _skill_catalog()
+    )
+    if skill_addon:
+        system_content = f"{system_content}\n{skill_addon}"
+    if agent.session.messages and agent.session.messages[0].role == "system":
+        agent.session.messages[0].content = system_content
+    agent.session.save()
+    renderer.info(f"工作目录已切换: {target}")
 
 
 def _handle_apikey(argument: str, renderer: Renderer, agent: Agent) -> None:

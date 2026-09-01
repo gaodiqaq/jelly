@@ -119,6 +119,7 @@ class ProviderStore:
         self._path = path or USER_CONFIG_PATH
         self._lock = threading.RLock()
         self._model = DEFAULT_MODEL
+        self._cwd: str | None = None
         self._providers: dict[str, ProviderInfo] = {}
         self._load()
 
@@ -138,6 +139,9 @@ class ProviderStore:
         model = raw.get("model")
         if isinstance(model, str) and model:
             self._model = model
+        cwd = raw.get("cwd")
+        if isinstance(cwd, str) and cwd.strip():
+            self._cwd = cwd
         providers = raw.get("providers")
         if isinstance(providers, dict):
             for name, info in providers.items():
@@ -159,9 +163,11 @@ class ProviderStore:
                 )
 
     def save(self) -> None:
-        """将当前 model 与 providers 写回配置文件（POSIX 下 chmod 600）。"""
+        """将当前 model / cwd / providers 写回配置文件（POSIX 下 chmod 600）。"""
         with self._lock:
             data: dict[str, Any] = {"model": self._model}
+            if self._cwd:
+                data["cwd"] = self._cwd
             if self._providers:
                 data["providers"] = {
                     name: {
@@ -193,6 +199,12 @@ class ProviderStore:
         if isinstance(model, str) and model and self._model == DEFAULT_MODEL:
             with self._lock:
                 self._model = model
+        # 工作目录：仅当 store 尚无持久化 cwd 时用启动配置填充
+        if not self._cwd:
+            cwd = getattr(settings, "cwd", None)
+            if isinstance(cwd, Path) and str(cwd):
+                with self._lock:
+                    self._cwd = str(cwd)
         seed = getattr(settings, "providers", None)
         if not isinstance(seed, dict):
             return
@@ -239,6 +251,23 @@ class ProviderStore:
             raise ValueError("模型名不能为空")
         with self._lock:
             self._model = model
+        self.save()
+
+    @property
+    def cwd(self) -> str | None:
+        """当前持久化的工作目录（None 表示未配置）。"""
+        with self._lock:
+            return self._cwd
+
+    def set_cwd(self, cwd: str | None) -> None:
+        """切换并持久化工作目录（None 清除配置）。
+
+        Args:
+            cwd: 工作目录（绝对路径）。
+        """
+        cwd = (cwd or "").strip()
+        with self._lock:
+            self._cwd = cwd or None
         self.save()
 
     def get_provider(self, name: str) -> ProviderInfo | None:

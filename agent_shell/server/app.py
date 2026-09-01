@@ -111,12 +111,14 @@ class ConfigUpdate(BaseModel):
         model: 切换当前模型（litellm 格式，含提供商前缀）。
         api_key: 提供商新 API Key；None 表示不修改。
         api_base: 提供商新 Base URL；None 表示不修改。
+        cwd: 切换全局工作目录（如 ``D:/work/project``）。
     """
 
     provider: str = Field(min_length=1, max_length=64)
     model: str | None = None
     api_key: str | None = None
     api_base: str | None = None
+    cwd: str | None = None
 
 
 class ConfigTestRequest(BaseModel):
@@ -377,11 +379,15 @@ def create_app(
     @app.get("/api/config", dependencies=[Depends(auth)])
     def get_config(request: Request) -> dict[str, Any]:
         """读取运行时配置（API Key 仅返回掩码）。"""
-        return {"model": store.model, "providers": store.list_providers()}
+        return {
+            "model": store.model,
+            "cwd": str(settings.cwd),
+            "providers": store.list_providers(),
+        }
 
     @app.put("/api/config", dependencies=[Depends(auth)])
     def update_config(request: Request, body: ConfigUpdate) -> dict[str, Any]:
-        """更新运行时配置：切换模型 / 更新提供商 Key 与 Base URL（热生效）。"""
+        """更新运行时配置：切换模型 / 更新提供商 Key 与 Base URL / 切换工作目录（热生效）。"""
         try:
             if body.api_key is not None:
                 store.upsert_provider(body.provider, api_key=body.api_key)
@@ -389,9 +395,17 @@ def create_app(
                 store.upsert_provider(body.provider, api_base=body.api_base)
             if body.model is not None:
                 store.set_model(body.model)
+            if body.cwd is not None and body.cwd.strip():
+                managers.for_user(request.state.user).set_cwd(Path(body.cwd))
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return {"model": store.model, "providers": store.list_providers()}
+        except OSError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {
+            "model": store.model,
+            "cwd": str(settings.cwd),
+            "providers": store.list_providers(),
+        }
 
     @app.post("/api/config/test", dependencies=[Depends(auth)])
     def test_config(request: Request, body: ConfigTestRequest) -> dict[str, Any]:

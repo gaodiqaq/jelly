@@ -13,10 +13,14 @@ node_modules/
 .DS_Store
 Thumbs.db
 
-# 本地杂物与生成物
+# local scratch & generated files
 scratch/
 chinese-novelist/
+# AI 创作作品（用户本地成果，不上传 GitHub）
+works/
 .pytest_tmp*
+.pytest_work*
+.pytest_work2*
 
-# ZCode 本地工作区
+# ZCode local workspace
 .zcode/

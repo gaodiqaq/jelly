@@ -96,6 +96,19 @@ class ToolRegistry:
         self._handlers[spec.name] = handler
         self._args_models[spec.name] = args_model
 
+    @property
+    def cwd(self) -> Path:
+        """当前工具工作目录（所有工具相对路径解析的基目录）。"""
+        return self._cwd
+
+    def set_cwd(self, cwd: Path) -> None:
+        """运行时切换工具工作目录（影响后续所有工具调用的相对路径解析）。
+
+        Args:
+            cwd: 新的工作目录（自动 expanduser + resolve）。
+        """
+        self._cwd = Path(cwd).expanduser().resolve()
+
     def specs(self) -> list[ToolSpec]:
         """返回全部已注册工具的声明列表（按注册顺序）。"""
         return list(self._specs.values())

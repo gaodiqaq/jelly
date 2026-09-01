@@ -15,6 +15,7 @@ from agent_shell.tools.base import (
 )
 from agent_shell.tools.bash import register_bash
 from agent_shell.tools.fs import register_fs
+from agent_shell.tools.open_file import register_open
 from agent_shell.tools.search import register_search
 from agent_shell.tools.todo import TodoStore, register_todo
 from agent_shell.tools.web import register_web
@@ -54,7 +55,14 @@ def build_registry(
         max_output_chars=max_output_chars,
         todo=todo,
     )
-    for register in (register_bash, register_fs, register_search, register_todo, register_web):
+    for register in (
+        register_bash,
+        register_fs,
+        register_open,
+        register_search,
+        register_todo,
+        register_web,
+    ):
         register(registry)
     if disabled:
         for name in sorted(disabled):

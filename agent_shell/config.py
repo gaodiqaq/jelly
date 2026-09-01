@@ -294,6 +294,10 @@ def _build_settings(raw: dict, env: dict[str, str], explicit_cwd: Path | None) -
     cwd: Path | None = explicit_cwd
     if cwd is None and env.get("AGENT_CWD"):
         cwd = Path(env["AGENT_CWD"])
+    if cwd is None and raw.get("cwd"):
+        raw_cwd = raw["cwd"]
+        if isinstance(raw_cwd, str) and raw_cwd.strip():
+            cwd = Path(raw_cwd)
 
     providers_raw = raw.get("providers") or {}
     if not isinstance(providers_raw, dict):

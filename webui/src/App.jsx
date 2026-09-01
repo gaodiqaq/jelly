@@ -198,7 +198,7 @@ export default function App() {
   const [config, setConfig] = useState(null)
   const [showSettings, setShowSettings] = useState(false)
   const [showModelPicker, setShowModelPicker] = useState(false)
-  const [propsDraft, setPropsDraft] = useState({ model: '', providers: {} })
+  const [propsDraft, setPropsDraft] = useState({ model: '', cwd: '', providers: {} })
   const [testing, setTesting] = useState(false)
   const [stopping, setStopping] = useState(false)
   const [usage, setUsage] = useState(null)
@@ -246,7 +246,7 @@ export default function App() {
     api('/api/config')
       .then((data) => {
         setConfig(data)
-        setPropsDraft({ model: data.model || '', providers: draftProviders(data.providers) })
+        setPropsDraft({ model: data.model || '', cwd: data.cwd || '', providers: draftProviders(data.providers) })
         loadProviders()
       })
       .catch(() => {})
@@ -591,12 +591,18 @@ export default function App() {
   const saveConfig = useCallback(async () => {
     setError('')
     try {
-      const { model: modelName } = propsDraft
+      const { model: modelName, cwd: cwdDraft } = propsDraft
       if (modelName && modelName.trim() && modelName.trim() !== config?.model) {
         const provider = modelName.trim().split('/')[0]
         await api('/api/config', {
           method: 'PUT',
           body: JSON.stringify({ provider, model: modelName.trim() }),
+        })
+      }
+      if (cwdDraft && cwdDraft.trim() && cwdDraft.trim() !== config?.cwd) {
+        await api('/api/config', {
+          method: 'PUT',
+          body: JSON.stringify({ provider: 'openai', cwd: cwdDraft.trim() }),
         })
       }
       for (const [name, p] of Object.entries(propsDraft.providers)) {
@@ -932,7 +938,7 @@ export default function App() {
                           setDraft(s.triggers[0] + ' ')
                       }}
                       >
-                        <span className="skill-item-name">{s.triggers[0]}</span>
+                        <span className="skill-item-name">{s.name}</span>
                         <span className="skill-item-desc">{s.description}</span>
                       </div>
                     ))}
@@ -1129,6 +1135,18 @@ function SettingsModal({ config, draft, testing, onChange, onSave, onTest, onClo
             value={draft.model}
             onChange={(e) => onChange({ ...draft, model: e.target.value })}
           />
+        </div>
+
+        <div className="modal-section">
+          <div className="field-label">工作目录（agent 的工具执行基目录）</div>
+          <input
+            type="text"
+            className="field-input"
+            placeholder="D:/work/project"
+            value={draft.cwd}
+            onChange={(e) => onChange({ ...draft, cwd: e.target.value })}
+          />
+          <div className="field-hint">切换后立即对下一轮对话生效，并持久化到配置。</div>
         </div>
 
         <div className="modal-section">

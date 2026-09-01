@@ -222,6 +222,41 @@ class SessionManager:
             serialized.append(entry)
         return serialized
 
+    def set_cwd(self, cwd: Path) -> Path:
+        """切换全局工作目录（Web 端"工作区"入口）。
+
+        切换立即对下一轮对话生效：Settings.cwd 更新、ToolRegistry 在下次
+        ``_build_agent`` 时使用新目录、所有已加载会话的系统提示词重建为
+        新 cwd 版本，并持久化到 ``~/.agent_shell/config.yaml`` 的 ``cwd`` 段。
+
+        Args:
+            cwd: 新的工作目录（相对路径基于当前 cwd 解析）。
+
+        Returns:
+            规范化后的绝对路径。
+
+        Raises:
+            OSError: 目录不存在或不可访问。
+        """
+        target = Path(cwd).expanduser()
+        if not target.is_absolute():
+            target = self._settings.cwd / target
+        target = target.resolve()
+        if not target.is_dir():
+            raise OSError(f"工作目录不存在: {target}")
+        # 1. 更新全局 settings（下次 _build_agent 生效）
+        self._settings.cwd = target
+        # 2. 持久化到配置文件
+        self._store.set_cwd(str(target))
+        # 3. 重建已加载会话的系统提示词（含新 cwd）并同步 session.cwd
+        system_prompt = build_system_prompt(target, self._store.model, self._skill_catalog())
+        for session in self._sessions.values():
+            session.cwd = target
+            if session.messages and session.messages[0].role == "system":
+                session.messages[0].content = system_prompt
+            session.save()
+        return target
+
     def rename_session(self, session_id: str, title: str) -> Session:
         """重命名会话并持久化。
 
