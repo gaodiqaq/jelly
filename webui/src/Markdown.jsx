@@ -16,6 +16,7 @@ function linkifyFilePaths(root) {
       const parent = node.parentElement
       if (!parent || parent.closest('a, pre, button')) return NodeFilter.FILTER_REJECT
       const value = node.nodeValue
+      FILE_PATH_RE.lastIndex = 0
       if (!value || !FILE_PATH_RE.test(value)) return NodeFilter.FILTER_REJECT
       return NodeFilter.FILTER_ACCEPT
     },
@@ -63,6 +64,12 @@ export default function Markdown({ text, onOpenFile }) {
   const handleClick = (event) => {
     const btn = event.target.closest('.file-link')
     if (btn && onOpenFile) onOpenFile(btn.dataset.path)
+    const anchor = event.target.closest('a')
+    const href = anchor?.getAttribute('href') || ''
+    if (onOpenFile && href && !/^(?:[a-z][a-z0-9+.-]*:|\/\/|#)/i.test(href)) {
+      event.preventDefault()
+      try { onOpenFile(decodeURIComponent(href)) } catch { onOpenFile(href) }
+    }
   }
 
   return (

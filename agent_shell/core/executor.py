@@ -42,8 +42,10 @@ class ToolExecutor:
         *,
         default_permission: str = "ask",
         auto_approve_read_only: bool = True,
+        journal=None,
     ) -> None:
         self._registry = registry
+        self._journal = journal
         self._ask = ask
         self._mode = default_permission
         self._auto = default_permission == "auto"
@@ -90,7 +92,11 @@ class ToolExecutor:
         decision = self._decide(call, spec.read_only)
         if decision in (PermissionDecision.DENY, PermissionDecision.DENY_ALL):
             return ToolResult(content=_DENY_MESSAGE, is_error=True)
-        return self._registry.call(call.name, call.arguments)
+
+        def invoke():
+            return self._registry.call(call.name, call.arguments)
+
+        return self._journal.execute(call, invoke) if self._journal else invoke()
 
     def _decide(self, call: ToolCall, read_only: bool) -> PermissionDecision:
         """计算权限决策。

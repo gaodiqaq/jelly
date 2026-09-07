@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import Markdown from './Markdown'
 import Workspace from './Workspace'
+import useTaskRun from './useTaskRun'
 import { api } from './api'
 
 const EMPTY_HISTORY = []
@@ -152,26 +153,15 @@ function ApprovalCard({ approval, onDecide }) {
           拒绝
         </button>
         <button className="approval-btn ghost" onClick={() => onDecide(approval.id, 'approve_all')}>
-          本会话始终允许
+          本轮始终允许
         </button>
         <button className="approval-btn ghost" onClick={() => onDecide(approval.id, 'deny_all')}>
-          本会话始终拒绝
+          本轮始终拒绝
         </button>
       </div>
       <div className="approval-hint">Agent 已暂停，等待你的决定后继续</div>
     </div>
   )
-}
-
-function wsUrl(sessionId) {
-  const proto = location.protocol === 'https:' ? 'wss' : 'ws'
-  return `${proto}://${location.host}/ws/${sessionId}`
-}
-
-function buildWsUrl(sessionId, token) {
-  const url = wsUrl(sessionId)
-  if (token) return `${url}?token=${encodeURIComponent(token)}`
-  return url
 }
 
 function draftProviders(providers) {
@@ -183,8 +173,14 @@ function draftProviders(providers) {
 }
 
 export default function App() {
+  const followOutput = useRef(true)
+  const [theme, setTheme] = useState(() => localStorage.getItem('jelly_theme') || 'light')
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme
+    localStorage.setItem('jelly_theme', theme)
+  }, [theme])
   const [sessions, setSessions] = useState([])
-  const [current, setCurrent] = useState(null)
+  const [current, setCurrent] = useState(() => localStorage.getItem('jelly_current') || null)
   const [history, setHistory] = useState(EMPTY_HISTORY)
   const [token, setToken] = useState(localStorage.getItem('agent_web_token') || '')
   const [busy, setBusy] = useState(false)
@@ -207,14 +203,12 @@ export default function App() {
   const [permMode, setPermMode] = useState('ask')
   const [showPermMenu, setShowPermMenu] = useState(false)
   const [pendingApproval, setPendingApproval] = useState(null)
-  const [wsOpen, setWsOpen] = useState(() => localStorage.getItem('jelly_ws_open') === '1')
-  const [wsWidth, setWsWidth] = useState(() => Number(localStorage.getItem('jelly_ws_width')) || 420)
+  const [wsOpen, setWsOpen] = useState(() => localStorage.getItem('jelly_ws_open') === '1' || (localStorage.getItem('jelly_ws_open') === null && window.innerWidth > 1100))
+  const [wsWidth, setWsWidth] = useState(() => Number(localStorage.getItem('jelly_ws_width')) || 600)
   const [wsFile, setWsFile] = useState(null)
-  const wsRef = useRef(null)
   const messagesRef = useRef(null)
   const modelPickerRef = useRef(null)
   const permMenuRef = useRef(null)
-  const stopTimeoutRef = useRef(null)
   const draftRef = useRef(null)
   const [navOpen, setNavOpen] = useState(false)
 
@@ -279,14 +273,6 @@ export default function App() {
     }
   }, [permMode])
 
-  const decideApproval = useCallback((id, decision) => {
-    const ws = wsRef.current
-    setPendingApproval(null)
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: 'approval_decision', id, decision }))
-    }
-  }, [])
-
   // 点击外部关闭弹出菜单
   useEffect(() => {
     const handleClickOutside = (e) => {
@@ -304,16 +290,14 @@ export default function App() {
   }, [showModelPicker, showPermMenu])
 
   useEffect(() => {
-    if (token) {
-      loadConfig()
-      loadSkills()
-      loadPermissions()
-    }
+    loadConfig()
+    loadSkills()
+    loadPermissions()
   }, [token, loadConfig, loadSkills, loadPermissions])
 
   useEffect(() => {
     const el = messagesRef.current
-    if (el) el.scrollTop = el.scrollHeight
+    if (el && followOutput.current) el.scrollTop = el.scrollHeight
   }, [history, pending, status, pendingApproval])
 
   // ---------- 工作台面板 ----------
@@ -391,26 +375,16 @@ export default function App() {
   )
 
   const openSession = useCallback(async (id) => {
+    followOutput.current = true
     setNavOpen(false)
-    if (wsRef.current) {
-      wsRef.current.close()
-      wsRef.current = null
-    }
     setCurrent(id)
     setHistory(EMPTY_HISTORY)
     setPending(null)
     setStatus('')
     setError('')
-    try {
-      const data = await api(`/api/sessions/${id}/messages`)
-      setHistory(data.messages || [])
-    } catch (e) {
-      setError(
-        e.status === 401
-          ? '认证失败：请确认右上角 AGENT_WEB_TOKEN 输入框已填写正确口令'
-          : `加载会话失败: ${e.message}`,
-      )
-    }
+    setBusy(false)
+    setStopping(false)
+    setPendingApproval(null)
   }, [])
 
   const renameSession = useCallback(async (id, title) => {
@@ -441,152 +415,36 @@ export default function App() {
     }
   }, [current])
 
-  const send = useCallback(
-    async (text) => {
-      if (!current || busy) return
-      const ws = new WebSocket(buildWsUrl(current, token))
-      wsRef.current = ws
-      const turn = { role: 'assistant', content: '', tool_calls: [] }
-      setPending({ ...turn })
-      setBusy(true)
-      setStatus('连接中…')
-      setUsage(null)
+  const run = useTaskRun(current, token, state => {
+    setHistory(state.history || [])
+    setPending(state.pending || null)
+    setBusy(state.busy)
+    setStopping(!!state.stopping && state.busy)
+    setStatus(state.status || '')
+    setPendingApproval(state.approval || null)
+    setUsage(state.usage || null)
+    if (state.skill) setActiveSkill(state.skill)
+    setError(state.error || '')
+  }, setError)
 
-      ws.onmessage = (event) => {
-        const msg = JSON.parse(event.data)
-        switch (msg.type) {
-          case 'status':
-            setStatus(msg.message || '')
-            break
-          case 'token':
-            turn.content += msg.text
-            setPending({ ...turn })
-            break
-          case 'tool_call':
-            turn.tool_calls.push({ name: msg.name, arguments: msg.arguments, status: 'running' })
-            setPending({ ...turn })
-            break
-          case 'tool_result': {
-            const tc = turn.tool_calls.find((c) => c.name === msg.name && c.status === 'running')
-            if (tc) {
-              tc.status = msg.is_error ? 'error' : 'done'
-              tc.output = msg.content
-            }
-            setPending({ ...turn })
-            break
-          }
-          case 'approval_request':
-            setPendingApproval({
-              id: msg.id,
-              name: msg.name,
-              arguments: msg.arguments || {},
-              read_only: !!msg.read_only,
-            })
-            break
-          case 'error':
-            setPendingApproval(null)
-            setError(msg.message || '生成失败')
-            break
-          case 'done':
-            if (wsRef.current === ws) {
-              if (stopTimeoutRef.current) {
-                clearTimeout(stopTimeoutRef.current)
-                stopTimeoutRef.current = null
-              }
-              setHistory((prev) => [...prev, turn])
-              setPending(null)
-              setBusy(false)
-              setStopping(false)
-              setStatus('')
-              setPendingApproval(null)
-              ws.close()
-              wsRef.current = null
-              refreshSessions()
-            }
-            break
-          case 'usage':
-            setUsage({
-              prompt_tokens: msg.prompt_tokens || 0,
-              completion_tokens: msg.completion_tokens || 0,
-              total_tokens: msg.total_tokens || 0,
-              cache_creation_tokens: msg.cache_creation_tokens || 0,
-              cache_read_tokens: msg.cache_read_tokens || 0,
-              model: msg.model || '',
-            })
-            break
-          case 'skill_activated':
-            setActiveSkill({ name: msg.name, description: msg.description })
-            break
-          case 'stopped':
-            if (wsRef.current === ws) {
-              if (stopTimeoutRef.current) {
-                clearTimeout(stopTimeoutRef.current)
-                stopTimeoutRef.current = null
-              }
-              setHistory((prev) => {
-                if (turn.content || turn.tool_calls.length > 0) {
-                  return [...prev, turn]
-                }
-                return prev
-              })
-              setPending(null)
-              setBusy(false)
-              setStopping(false)
-              setStatus('')
-              setPendingApproval(null)
-              ws.close()
-              wsRef.current = null
-              refreshSessions()
-            }
-            break
-          default:
-            break
-        }
-      }
-      ws.onerror = () => {
-        setBusy(false)
-        setStopping(false)
-        setError('连接失败（请确认已启动服务且网络正常）')
-      }
-      ws.onopen = () => {
-        ws.send(JSON.stringify({ type: 'user_message', content: text }))
-      }
-    },
-    [current, busy, token, refreshSessions],
-  )
-
-  const submit = useCallback(
-    (text) => {
-      if (!current || busy || !text.trim()) return
-      const content = text.trim()
-      setDraft('')
-      setError('')
-      setHistory((prev) => [...prev, { role: 'user', content }])
-      send(content)
-    },
-    [current, busy, send],
-  )
-
-  const stop = useCallback(() => {
-    if (wsRef.current && busy) {
-      wsRef.current.send(JSON.stringify({ type: 'stop' }))
-      setStopping(true)
-      setStatus('正在停止…')
-      // 超时保护：5秒后如果还没响应，强制重置状态
-      stopTimeoutRef.current = setTimeout(() => {
-        if (stopping || busy) {
-          setBusy(false)
-          setStopping(false)
-          setStatus('')
-          if (wsRef.current) {
-            wsRef.current.close()
-            wsRef.current = null
-          }
-          refreshSessions()
-        }
-      }, 5000)
-    }
-  }, [busy, stopping])
+  useEffect(() => {
+    if (current) localStorage.setItem('jelly_current', current)
+    else localStorage.removeItem('jelly_current')
+  }, [current])
+  useEffect(() => { if (!busy) refreshSessions() }, [busy, refreshSessions])
+  const submit = async text => {
+    if (!current || busy || !text.trim()) return
+    setBusy(true)
+    try { await run.send(text.trim()); setDraft('') }
+    catch { setBusy(false) }
+  }
+  const stop = async () => {
+    setStopping(true); setStatus('正在停止，等待执行器退出…')
+    try { await run.stop() } catch { setStopping(false) }
+  }
+  const decideApproval = async (id, decision) => {
+    try { await run.approve(id, decision); setPendingApproval(null) } catch {}
+  }
 
   const saveConfig = useCallback(async () => {
     setError('')
@@ -688,14 +546,14 @@ export default function App() {
             <span className="jelly-cube brand-cube" aria-hidden="true" />
             <span className="brand-text">
               <span className="brand-name">果冻</span>
-              <span className="brand-sub">Jelly · Agent</span>
+              <span className="brand-sub">Jelly · Studio</span>
             </span>
           </div>
         </div>
-        <button className="new-chat" onClick={newSession} disabled={busy}>
-          <Icon.plus /> 新会话
+        <button className="new-chat" onClick={newSession}>
+          <Icon.plus /> 新建作品
         </button>
-        <div className="session-label">历史会话</div>
+        <div className="session-label">工作记录</div>
         <ul className="session-list">
           {sessions.map((s) => (
             <SessionItem
@@ -708,7 +566,7 @@ export default function App() {
             />
           ))}
         </ul>
-        {sessions.length === 0 && <div className="empty-sessions">暂无会话<br />点击上方「新会话」开始</div>}
+        {sessions.length === 0 && <div className="empty-sessions">暂无会话<br />点击上方「新建作品」开始</div>}
       </aside>
       <div className="nav-backdrop" onClick={() => setNavOpen(false)} />
 
@@ -719,10 +577,11 @@ export default function App() {
               <Icon.menu />
             </button>
             <span className="chat-title">
-              {current ? `会话 ${current.slice(0, 8)}` : '未选择会话'}
+              {sessions.find(s => s.session_id === current)?.title || '我的工作室'}
             </span>
           </div>
           <div className="header-right">
+            <button className="theme-button" aria-label="切换明暗主题" title="切换明暗主题" onClick={() => setTheme(t => t === 'light' ? 'dark' : 'light')}>{theme === 'light' ? '◐' : '☼'}</button>
             {model && (
               <div className="model-picker" ref={modelPickerRef}>
                 <button
@@ -807,16 +666,16 @@ export default function App() {
           </div>
         </header>
         {error && <div className="error-banner">{error}</div>}
-        <div className="messages" ref={messagesRef}>
+        <div className="messages" ref={messagesRef} onScroll={e => { const el = e.currentTarget; followOutput.current = el.scrollHeight - el.scrollTop - el.clientHeight < 100 }}>
           {history.length === 0 && !pending && (
             <div className="empty-state">
               <div>
                 <span className="jelly-cube empty-cube" aria-hidden="true" />
-                <div className="empty-title">你好，我是果冻</div>
+                <div className="empty-title">把想法，慢慢做成作品。</div>
                 <div className="empty-sub">
-                  可以让我读写文件、执行命令、搜索网络、管理待办
+                  和果冻一起写文档、打磨代码、制作网页。
                   <br />
-                  点击消息里的文件路径，可在右侧工作台直接预览
+                  成果在旁边生长，每次文件修改都留下版本。
                 </div>
                 <div className="empty-chips">
                   {SUGGESTIONS.map((t) => (
@@ -873,7 +732,7 @@ export default function App() {
           <div className="composer-box">
             <textarea
               ref={draftRef}
-              placeholder={current ? '输入消息，Enter 发送，Shift+Enter 换行' : '请先新建或选择会话'}
+              placeholder={current ? '描述你想做的作品，或继续打磨眼前的成果…' : '请先新建或选择会话'}
               disabled={!current || busy}
               value={draft}
               onChange={(e) => setDraft(e.target.value)}
@@ -973,6 +832,10 @@ export default function App() {
           <aside className="workspace-panel" style={{ width: wsWidth }}>
             <div className="ws-resizer" onPointerDown={startWsResize} aria-hidden="true" />
             <Workspace
+              sessionId={current}
+              onUseRecipe={startWith}
+              recipeSeed={history.filter(m => m.role === 'user').at(-1)?.content || ''}
+              busy={busy}
               file={wsFile}
               onOpenFile={openFile}
               onCloseFile={closeFile}

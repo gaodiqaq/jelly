@@ -16,11 +16,13 @@ import itertools
 import threading
 import time
 from collections.abc import Awaitable, Callable
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
 from agent_shell.config import Settings
 from agent_shell.core import Agent, AgentCallbacks, AgentInterrupted, LLMError, Session
+from agent_shell.core.changes import ChangeJournal
 from agent_shell.core.executor import ToolExecutor
 from agent_shell.errors import SessionError
 from agent_shell.llm.client import LLMClient
@@ -207,13 +209,22 @@ class SessionManager:
             消息字典列表。
         """
         serialized: list[dict[str, Any]] = []
+        results = {m.tool_call_id: m for m in session.messages if m.role == "tool"}
         for message in session.messages:
             if message.role == "system":
                 continue
             entry: dict[str, Any] = {"role": message.role, "content": message.content}
             if message.role == "assistant" and message.tool_calls:
                 entry["tool_calls"] = [
-                    {"name": call.name, "arguments": call.arguments, "status": "done"}
+                    {
+                        "call_id": call.id,
+                        "name": call.name,
+                        "arguments": call.arguments,
+                        "status": "error"
+                        if call.id in results and results[call.id].is_error
+                        else "done",
+                        "output": results[call.id].content if call.id in results else "",
+                    }
                     for call in message.tool_calls
                 ]
             if message.role == "tool":
@@ -238,6 +249,8 @@ class SessionManager:
         Raises:
             OSError: 目录不存在或不可访问。
         """
+        if self._running:
+            raise ValueError("请等待任务完成后切换工作区")
         target = Path(cwd).expanduser()
         if not target.is_absolute():
             target = self._settings.cwd / target
@@ -290,6 +303,8 @@ class SessionManager:
             SessionError: 会话不存在或文件删除失败。
         """
         self.get_session(session_id)
+        if session_id in self._running:
+            raise SessionError("任务正在运行，请先停止后再删除")
         self._sessions.pop(session_id, None)
         self._todo.pop(session_id, None)
         self._running.discard(session_id)
@@ -318,6 +333,17 @@ class SessionManager:
         return True
 
     # ---------- 执行 ----------
+
+    def changes(self, session_id: str) -> ChangeJournal:
+        self.get_session(session_id)
+        return ChangeJournal(self._session_dir / "changes" / session_id, self._settings.cwd)
+
+    def restore_change(self, session_id: str, change_id: str):
+        if self._running:
+            raise ValueError("请等待运行结束后恢复文件")
+        if self._permission_mode in {"readonly", "deny"}:
+            raise ValueError("当前权限模式不允许恢复文件")
+        return self.changes(session_id).restore(change_id)
 
     async def run_agent(
         self,
@@ -400,11 +426,13 @@ class SessionManager:
 
         def on_tool_call(call) -> None:
             current_tool["name"] = call.name
-            push(ToolCallEvent(name=call.name, arguments=call.arguments))
+            current_tool["id"] = call.id
+            push(ToolCallEvent(name=call.name, arguments=call.arguments, call_id=call.id))
 
         def on_tool_result(result) -> None:
             push(
                 ToolResultEvent(
+                    call_id=current_tool.get("id", ""),
                     name=current_tool.get("name", "tool"),
                     content=result.content,
                     is_error=result.is_error,
@@ -430,7 +458,9 @@ class SessionManager:
                 )
             )
 
-        def on_approval_request(call: ToolCall, tool_name: str, read_only: bool) -> PermissionDecision:
+        def on_approval_request(
+            call: ToolCall, tool_name: str, read_only: bool
+        ) -> PermissionDecision:
             """手动审批桥接：推送确认请求并阻塞 worker 线程等待决策。"""
 
             approval_id = f"ap-{next(self._approval_seq)}"
@@ -472,11 +502,7 @@ class SessionManager:
 
         def worker() -> None:
             try:
-                ask = (
-                    on_approval_request
-                    if self._permission_mode == "ask"
-                    else None
-                )
+                ask = on_approval_request if self._permission_mode == "ask" else None
                 agent = self._build_agent(session, callbacks, cancel_event, ask=ask)
                 agent.run(user_input)
             except AgentInterrupted:
@@ -539,11 +565,12 @@ class SessionManager:
             ask,
             default_permission=self._permission_mode,
             auto_approve_read_only=self._settings.permissions.auto_approve_read_only,
+            journal=self.changes(session.session_id),
         )
         return Agent(
-            self._settings,
+            deepcopy(self._settings),
             session,
-            self._llm,
+            self._llm.snapshot() if isinstance(self._llm, LLMClient) else self._llm,
             executor,
             callbacks,
             stream=True,

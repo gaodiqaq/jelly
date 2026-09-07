@@ -34,6 +34,7 @@ class ToolCallEvent(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     type: Literal["tool_call"] = "tool_call"
+    call_id: str = ""
     name: str
     arguments: dict[str, Any] = Field(default_factory=dict)
 
@@ -44,6 +45,7 @@ class ToolResultEvent(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     type: Literal["tool_result"] = "tool_result"
+    call_id: str = ""
     name: str
     content: str
     is_error: bool = False

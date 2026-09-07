@@ -1,6 +1,8 @@
 import React, { useCallback, useEffect, useState } from 'react'
 import Markdown from './Markdown'
 import { api, authToken } from './api'
+import Changes from './Changes'
+import Recipes from './Recipes'
 
 const STROKE = { fill: 'none', stroke: 'currentColor', strokeWidth: 1.8, strokeLinecap: 'round', strokeLinejoin: 'round' }
 
@@ -154,6 +156,8 @@ function Preview({ path, onBack, onOpenFile }) {
         <a className="ws-raw-link" href={rawUrl} target="_blank" rel="noreferrer">打开原始文件</a>
       </div>
     )
+  } else if (/\.html?$/i.test(path) && !data.truncated) {
+    body = <iframe className="studio-web-preview" title={`网页预览：${data.name}`} sandbox="" referrerPolicy="no-referrer" srcDoc={'<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; img-src data:; style-src \'unsafe-inline\'; font-src data:;">' + data.content} />
   } else if (isMd) {
     body = <div className="ws-md"><Markdown text={data.content} onOpenFile={onOpenFile} /></div>
   } else {
@@ -185,23 +189,33 @@ function Preview({ path, onBack, onOpenFile }) {
 
 // ---------- 面板主体 ----------
 
-export default function Workspace({ file, onOpenFile, onCloseFile, onClose }) {
+export default function Workspace({ file, onOpenFile, onCloseFile, onClose, sessionId, busy, onUseRecipe, recipeSeed }) {
+  const [tab, setTab] = useState('changes')
+  const [revision, setRevision] = useState(0)
+  useEffect(() => { if (!busy) setRevision(n => n + 1) }, [busy, sessionId])
+  useEffect(() => { if (file) setTab('files') }, [file])
   return (
     <>
       <div className="ws-head">
         <span className="ws-title">
           <FolderIcon />
-          {file ? file.split('/').pop() : '工作区'}
+          {file ? file.split('/').pop() : '作品空间'}
         </span>
         <button className="ws-close" aria-label="关闭工作台" title="关闭工作台" onClick={onClose}>
           ✕
         </button>
       </div>
-      {/* 文件树保持挂载以保留展开状态，预览时隐藏 */}
-      <div className="ws-tree-wrap" hidden={!!file}>
-        <FileTree onOpenFile={onOpenFile} activeFile={file} />
+      <div className="studio-tabs" role="tablist" aria-label="作品空间">
+        <button role="tab" aria-selected={tab === 'changes'} onClick={() => setTab('changes')}>成果与版本</button>
+        <button role="tab" aria-selected={tab === 'files'} onClick={() => setTab('files')}>文件预览</button>
+        <button role="tab" aria-selected={tab === 'recipes'} onClick={() => setTab('recipes')}>工作配方</button>
       </div>
-      {file && <Preview path={file} onBack={onCloseFile} onOpenFile={onOpenFile} />}
+      {tab === 'recipes' ? <Recipes onUse={onUseRecipe} seed={recipeSeed} /> : tab === 'changes' ? <Changes key={sessionId} sessionId={sessionId} busy={busy} onOpenFile={path => { setTab('files'); onOpenFile(path) }} onRestored={() => setRevision(n => n + 1)} /> : <>
+        <div className="ws-tree-wrap" hidden={!!file}>
+          <FileTree key={`${sessionId}-${revision}`} onOpenFile={onOpenFile} activeFile={file} />
+        </div>
+        {file && <Preview key={`${file}-${revision}`} path={file} onBack={onCloseFile} onOpenFile={onOpenFile} />}
+      </>}
     </>
   )
 }

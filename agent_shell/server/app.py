@@ -54,6 +54,8 @@ from agent_shell.llm.client import LLMClient, is_private_base, proxy_bypass_clie
 from agent_shell.runtime import ProviderStore
 from agent_shell.server.events import ClientMessage
 from agent_shell.server.manager import SessionManager
+from agent_shell.server.recipes import RecipeInput, RecipeStore
+from agent_shell.server.runs import RunService
 
 _DIST_DIR = Path(__file__).resolve().parents[2] / "webui" / "dist"
 
@@ -311,6 +313,13 @@ def create_app(
     if manager is not None:
         managers._managers[None] = manager
     auth = _make_auth_dependency(users)
+    run_services = {}
+
+    def runs(request):
+        user = request.state.user
+        if user not in run_services:
+            run_services[user] = RunService(managers.for_user(user))
+        return run_services[user]
 
     app = FastAPI(
         title="果冻",
@@ -396,6 +405,8 @@ def create_app(
             if body.model is not None:
                 store.set_model(body.model)
             if body.cwd is not None and body.cwd.strip():
+                if any(m._running for m in managers._managers.values()):
+                    raise ValueError("请等待所有任务完成后切换共享工作区")
                 managers.for_user(request.state.user).set_cwd(Path(body.cwd))
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -524,6 +535,73 @@ def create_app(
             raise HTTPException(status_code=404, detail=f"文件不存在: {path}")
         media_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
         return FileResponse(target, media_type=media_type, filename=target.name)
+
+    def recipes(request):
+        return RecipeStore(managers.for_user(request.state.user)._session_dir / "recipes")
+
+    @app.get("/api/recipes", dependencies=[Depends(auth)])
+    def list_recipes(request: Request):
+        return {"recipes": recipes(request).list()}
+
+    @app.post("/api/recipes", dependencies=[Depends(auth)])
+    def create_recipe(request: Request, body: RecipeInput):
+        try:
+            return recipes(request).save(body)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.put("/api/recipes/{recipe_id}", dependencies=[Depends(auth)])
+    def update_recipe(request: Request, recipe_id: str, body: RecipeInput):
+        try:
+            return recipes(request).save(body, recipe_id)
+        except (ValueError, OSError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.delete("/api/recipes/{recipe_id}", dependencies=[Depends(auth)])
+    def delete_recipe(request: Request, recipe_id: str):
+        try:
+            recipes(request).delete(recipe_id)
+            return {"deleted": True}
+        except (ValueError, OSError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/api/sessions/{session_id}/run", dependencies=[Depends(auth)])
+    async def run_snapshot(request: Request, session_id: str):
+        return runs(request).snapshot(session_id)
+
+    @app.post("/api/sessions/{session_id}/run", dependencies=[Depends(auth)])
+    async def start_run(request: Request, session_id: str, body: ClientMessage):
+        try:
+            return runs(request).start(session_id, body.content)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post("/api/sessions/{session_id}/run/stop", dependencies=[Depends(auth)])
+    async def stop_run(request: Request, session_id: str):
+        return runs(request).stop(session_id)
+
+    @app.post("/api/sessions/{session_id}/run/approval", dependencies=[Depends(auth)])
+    async def approve_run(request: Request, session_id: str, body: dict):
+        manager = managers.for_user(request.state.user)
+        manager.get_session(session_id)
+        if not manager.resolve_approval(
+            session_id, str(body.get("id", "")), str(body.get("decision", ""))
+        ):
+            raise HTTPException(status_code=409, detail="审批已结束或不存在")
+        return {"ok": True}
+
+    @app.get("/api/sessions/{session_id}/changes", dependencies=[Depends(auth)])
+    def list_changes(request: Request, session_id: str):
+        return {"changes": managers.for_user(request.state.user).changes(session_id).list()}
+
+    @app.post(
+        "/api/sessions/{session_id}/changes/{change_id}/restore", dependencies=[Depends(auth)]
+    )
+    def restore_change(request: Request, session_id: str, change_id: str):
+        try:
+            return managers.for_user(request.state.user).restore_change(session_id, change_id)
+        except (ValueError, OSError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     @app.get("/api/sessions", dependencies=[Depends(auth)])
     def list_sessions(request: Request) -> dict[str, Any]:

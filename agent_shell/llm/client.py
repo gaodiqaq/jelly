@@ -16,6 +16,7 @@ import os
 import socket
 import threading
 from collections.abc import Callable, Sequence
+from copy import copy
 from typing import Any
 from urllib.parse import urlparse
 
@@ -101,6 +102,7 @@ class LLMClient:
 
     def __init__(self, settings: Settings, store: ProviderStore | None = None) -> None:
         self._fallback_model = settings.model
+        self._resolved_snapshot = None
         self._store = store
         self._temperature = settings.api.temperature
         self._max_tokens = settings.api.max_tokens
@@ -151,6 +153,8 @@ class LLMClient:
         Returns:
             ``(model, api_key, api_base)`` 三元组。
         """
+        if self._resolved_snapshot is not None:
+            return self._resolved_snapshot
         if self._store is not None:
             return self._store.resolve(model)
         name = model or self._fallback_model
@@ -160,6 +164,14 @@ class LLMClient:
             os.environ.get(f"{prefix}_API_KEY"),
             os.environ.get(f"{prefix}_API_BASE"),
         )
+
+    def snapshot(self) -> LLMClient:
+        """Freeze the model and credentials for one run without writing configuration."""
+        client = copy(self)
+        client._resolved_snapshot = self._resolve()
+        client._fallback_model = client._resolved_snapshot[0]
+        client._store = None
+        return client
 
     def complete(
         self,
