@@ -1,5 +1,5 @@
 # --- 前端构建 ---
-FROM node:22-alpine AS webui
+FROM node:26-alpine AS webui
 WORKDIR /app
 COPY webui/package.json webui/package-lock.json* ./
 RUN npm ci
