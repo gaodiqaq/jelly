@@ -1,8 +1,13 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
-import Markdown from './Markdown'
+
 import Workspace from './Workspace'
 import useTaskRun from './useTaskRun'
-import { api } from './api'
+import ProjectDialog from './ProjectDialog'
+import Artifacts from './Artifacts'
+import Conversation, { ExecutionList } from './Conversation'
+import useArtifacts from './useArtifacts'
+import { api, authToken } from './api'
+import { focusMenuItem, handleMenuKeyDown, handleTabListKeyDown } from './a11y'
 
 const EMPTY_HISTORY = []
 
@@ -65,55 +70,8 @@ const PERMISSION_MODES = [
   { value: 'readonly', label: '只读', icon: 'eye', desc: '仅放行查看类操作，修改性工具直接拒绝' },
   { value: 'ask', label: '手动审批', icon: 'shield', desc: '每次修改性操作先向你确认' },
   { value: 'auto', label: '自动授权', icon: 'zap', desc: '全部工具自动放行，无需确认' },
+  { value: 'deny', label: '禁用工具', icon: 'shield', desc: '只进行对话，拒绝所有工具调用' },
 ]
-
-const TOOL_ICONS = {
-  web_fetch: 'globe',
-  bash: 'terminal',
-  read: 'file',
-  write: 'file',
-  edit: 'file',
-  ls: 'folder',
-  glob: 'search',
-  grep: 'search',
-  todo_add: 'check-square',
-  todo_done: 'check-square',
-  todo_list: 'list',
-}
-
-const TOOL_SVGS = {
-  globe: (
-    <svg viewBox="0 0 24 24" {...STROKE}>
-      <circle cx="12" cy="12" r="10" />
-      <path d="M2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
-    </svg>
-  ),
-  terminal: (
-    <svg viewBox="0 0 24 24" {...STROKE}><path d="m4 17 6-6-6-6M12 19h8" /></svg>
-  ),
-  file: (
-    <svg viewBox="0 0 24 24" {...STROKE}>
-      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-      <path d="M14 2v6h6M9 13h6M9 17h6" />
-    </svg>
-  ),
-  folder: (
-    <svg viewBox="0 0 24 24" {...STROKE}><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" /></svg>
-  ),
-  search: (
-    <svg viewBox="0 0 24 24" {...STROKE}><circle cx="11" cy="11" r="8" /><path d="m21 21-4.35-4.35" /></svg>
-  ),
-  'check-square': (
-    <svg viewBox="0 0 24 24" {...STROKE}><path d="m9 11 3 3L22 4" /><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11" /></svg>
-  ),
-  list: (
-    <svg viewBox="0 0 24 24" {...STROKE}><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01" /></svg>
-  ),
-}
-
-function ToolIcon({ name }) {
-  return <span className="tool-icon">{TOOL_SVGS[TOOL_ICONS[name]] || TOOL_SVGS.terminal}</span>
-}
 
 const PERM_ICONS = { eye: Icon.eye, shield: Icon.shield, zap: Icon.zap }
 
@@ -128,15 +86,24 @@ function PermCurrentIcon({ mode }) {
 }
 
 function ApprovalCard({ approval, onDecide }) {
+  const allowRef = useRef(null)
   const argsText =
     typeof approval.arguments === 'string'
       ? approval.arguments
       : JSON.stringify(approval.arguments, null, 2)
+  useEffect(() => {
+    const previousFocus = document.activeElement
+    allowRef.current?.focus()
+    return () => {
+      if (previousFocus instanceof HTMLElement && previousFocus.isConnected) previousFocus.focus()
+    }
+  }, [approval.id])
+
   return (
-    <div className="approval-card" role="alertdialog" aria-label="权限确认">
+    <div className="approval-card" role="alertdialog" aria-labelledby="approval-title" aria-describedby="approval-hint">
       <div className="approval-head">
         <span className="approval-icon"><Icon.shield /></span>
-        <span className="approval-title">权限确认</span>
+        <span className="approval-title" id="approval-title">权限确认</span>
         <span className="approval-tool">
           <span className={`approval-badge ${approval.read_only ? 'ro' : 'mut'}`}>
             {approval.read_only ? '只读' : '修改'}
@@ -146,7 +113,7 @@ function ApprovalCard({ approval, onDecide }) {
       </div>
       {argsText !== '{}' && <pre className="approval-args">{argsText}</pre>}
       <div className="approval-actions">
-        <button className="approval-btn allow" onClick={() => onDecide(approval.id, 'approve')}>
+        <button ref={allowRef} className="approval-btn allow" onClick={() => onDecide(approval.id, 'approve')}>
           允许
         </button>
         <button className="approval-btn deny" onClick={() => onDecide(approval.id, 'deny')}>
@@ -159,7 +126,7 @@ function ApprovalCard({ approval, onDecide }) {
           本轮始终拒绝
         </button>
       </div>
-      <div className="approval-hint">Agent 已暂停，等待你的决定后继续</div>
+      <div className="approval-hint" id="approval-hint">Agent 已暂停，等待你的决定后继续</div>
     </div>
   )
 }
@@ -172,17 +139,68 @@ function draftProviders(providers) {
   return out
 }
 
+function keepFocusInside(event, container) {
+  if (event.key !== 'Tab') return
+  const focusable = Array.from(container?.querySelectorAll(
+    'button:not([disabled]), input:not([disabled]), textarea:not([disabled]), select:not([disabled]), [href], [tabindex]:not([tabindex="-1"])',
+  ) || []).filter(element => !element.hidden)
+  if (!focusable.length) return
+  const first = focusable[0]
+  const last = focusable.at(-1)
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault(); last.focus()
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault(); first.focus()
+  }
+}
+
+function AccessGate({ onAuthenticate }) {
+  const [value, setValue] = useState('')
+  const [error, setError] = useState('')
+  const [busy, setBusy] = useState(false)
+  const cardRef = useRef(null)
+  async function submit(event) {
+    event.preventDefault()
+    if (!value.trim()) return
+    setBusy(true)
+    setError('')
+    try { await onAuthenticate(value.trim()) }
+    catch (e) { setError(e.message) }
+    finally { setBusy(false) }
+  }
+  return <div className="access-gate" role="dialog" aria-modal="true" aria-labelledby="access-title" onKeyDown={event => keepFocusInside(event, cardRef.current)}><form ref={cardRef} className="access-card" onSubmit={submit}>
+    <span className="jelly-cube access-cube" aria-hidden="true" />
+    <span className="eyebrow">PRIVATE WORKSPACE</span>
+    <h1 id="access-title">回到你的 Jelly 工作台</h1>
+    <p>这个工作台启用了访问保护。输入服务启动时配置的访问口令。</p>
+    <label>访问口令<input autoFocus name="access-token" type="password" autoComplete="off" value={value} onChange={event => setValue(event.target.value)} placeholder="AGENT_WEB_TOKEN" /></label>
+    {error && <p className="form-error" role="alert">{error}</p>}
+    <button className="solid-button" disabled={busy || !value.trim()}>{busy ? '正在验证…' : '进入工作台'}</button>
+  </form></div>
+}
+
 export default function App() {
   const followOutput = useRef(true)
-  const [theme, setTheme] = useState(() => localStorage.getItem('jelly_theme') || 'light')
+  const [theme, setTheme] = useState(() => localStorage.getItem('jelly_theme') || 'dark')
   useEffect(() => {
     document.documentElement.dataset.theme = theme
     localStorage.setItem('jelly_theme', theme)
   }, [theme])
   const [sessions, setSessions] = useState([])
+  const [sessionsLoaded, setSessionsLoaded] = useState(false)
+  const [projects, setProjects] = useState([])
+  const [projectsLoaded, setProjectsLoaded] = useState(false)
+  const [projectId, setProjectId] = useState(() => localStorage.getItem('jelly_project') || null)
+  const [projectDialog, setProjectDialog] = useState(null)
+  const [taskFilter, setTaskFilter] = useState('all')
+  const [taskSearch, setTaskSearch] = useState('')
+  const [conversationTab, setConversationTab] = useState('chat')
+  const [artifactRevision, setArtifactRevision] = useState(0)
+  const [openedFiles, setOpenedFiles] = useState([])
   const [current, setCurrent] = useState(() => localStorage.getItem('jelly_current') || null)
   const [history, setHistory] = useState(EMPTY_HISTORY)
-  const [token, setToken] = useState(localStorage.getItem('agent_web_token') || '')
+  const [token, setToken] = useState(authToken())
+  const [authRequired, setAuthRequired] = useState(false)
   const [busy, setBusy] = useState(false)
   const [status, setStatus] = useState('')
   const [error, setError] = useState('')
@@ -194,6 +212,7 @@ export default function App() {
   const [config, setConfig] = useState(null)
   const [showSettings, setShowSettings] = useState(false)
   const [showModelPicker, setShowModelPicker] = useState(false)
+  const [showSkillMenu, setShowSkillMenu] = useState(false)
   const [propsDraft, setPropsDraft] = useState({ model: '', cwd: '', providers: {} })
   const [testing, setTesting] = useState(false)
   const [stopping, setStopping] = useState(false)
@@ -204,13 +223,61 @@ export default function App() {
   const [showPermMenu, setShowPermMenu] = useState(false)
   const [pendingApproval, setPendingApproval] = useState(null)
   const [wsOpen, setWsOpen] = useState(() => localStorage.getItem('jelly_ws_open') === '1' || (localStorage.getItem('jelly_ws_open') === null && window.innerWidth > 1100))
-  const [wsWidth, setWsWidth] = useState(() => Number(localStorage.getItem('jelly_ws_width')) || 600)
+  const [wsWidth, setWsWidth] = useState(() => Number(localStorage.getItem('jelly_ws_width')) || 480)
   const [wsFile, setWsFile] = useState(null)
   const messagesRef = useRef(null)
   const modelPickerRef = useRef(null)
   const permMenuRef = useRef(null)
+  const skillMenuRef = useRef(null)
   const draftRef = useRef(null)
   const [navOpen, setNavOpen] = useState(false)
+  const activeSession = sessions.find(s => s.session_id === current)
+  const activeProject = projects.find(p => p.id === (activeSession?.project_id || projectId))
+  const effectiveModel = activeProject?.model || model
+  const effectivePermission = activeProject?.permission || permMode
+  const artifactState = useArtifacts(current, busy, artifactRevision)
+  const artifacts = artifactState.files
+  const scope = current ? `session_id=${encodeURIComponent(current)}` : projectId ? `project_id=${encodeURIComponent(projectId)}` : ''
+  const visibleSessions = sessions.filter(s => (!projectId || s.project_id === projectId) && (taskFilter !== 'running' || s.running || (s.session_id === current && busy)) && (s.title || '').toLowerCase().includes(taskSearch.toLowerCase()))
+  const allCalls = [...history, ...(pending ? [pending] : [])].flatMap(m => m.tool_calls || [])
+  const knownArtifacts = useRef(new Set())
+
+  const lockWorkspace = useCallback(() => {
+    sessionStorage.removeItem('agent_web_token')
+    localStorage.removeItem('agent_web_token')
+    setToken(''); setAuthRequired(true); setSessions([]); setProjects([])
+    setSessionsLoaded(false); setProjectsLoaded(false)
+    setCurrent(null); setProjectId(null); setHistory(EMPTY_HISTORY); setPending(null)
+    setOpenedFiles([]); setWsFile(null); setError('')
+  }, [])
+  useEffect(() => {
+    window.addEventListener('jelly:unauthorized', lockWorkspace)
+    return () => window.removeEventListener('jelly:unauthorized', lockWorkspace)
+  }, [lockWorkspace])
+
+  const loadProjects = useCallback(async () => {
+    try {
+      const data = await api('/api/projects')
+      setProjects(data.projects)
+    } catch (e) {
+      setError(e.message)
+    } finally {
+      setProjectsLoaded(true)
+    }
+  }, [])
+  useEffect(() => { loadProjects() }, [loadProjects, token])
+  useEffect(() => {
+    if (activeSession) setProjectId(activeSession.project_id || null)
+  }, [current, activeSession?.project_id])
+  useEffect(() => {
+    if (projectId) localStorage.setItem('jelly_project', projectId)
+    else localStorage.removeItem('jelly_project')
+  }, [projectId])
+  useEffect(() => {
+    knownArtifacts.current = new Set()
+    setWsFile(null); setOpenedFiles([]); setConversationTab('chat'); setActiveSkill(null)
+    setPendingApproval(null); setHistory(EMPTY_HISTORY); setPending(null); setStatus(''); setBusy(false)
+  }, [current])
 
   const SUGGESTIONS = ['帮我梳理这个项目的目录结构', '写一个贪吃蛇网页小游戏', '查一下今天的科技新闻']
 
@@ -260,9 +327,14 @@ export default function App() {
 
   const changePermission = useCallback(async (mode) => {
     setShowPermMenu(false)
-    if (mode === permMode) return
+    if (mode === effectivePermission) return
     setError('')
     try {
+      if (activeProject) {
+        await api(`/api/projects/${activeProject.id}`, { method: 'PUT', body: JSON.stringify({ ...activeProject, permission: mode }) })
+        await loadProjects()
+        return
+      }
       const data = await api('/api/permissions', {
         method: 'PUT',
         body: JSON.stringify({ mode }),
@@ -271,7 +343,7 @@ export default function App() {
     } catch (e) {
       setError(`切换权限模式失败: ${e.message}`)
     }
-  }, [permMode])
+  }, [effectivePermission, activeProject, loadProjects])
 
   // 点击外部关闭弹出菜单
   useEffect(() => {
@@ -282,12 +354,27 @@ export default function App() {
       if (permMenuRef.current && !permMenuRef.current.contains(e.target)) {
         setShowPermMenu(false)
       }
+      if (skillMenuRef.current && !skillMenuRef.current.contains(e.target)) {
+        setShowSkillMenu(false)
+      }
     }
-    if (showModelPicker || showPermMenu) {
+    if (showModelPicker || showPermMenu || showSkillMenu) {
       document.addEventListener('mousedown', handleClickOutside)
       return () => document.removeEventListener('mousedown', handleClickOutside)
     }
-  }, [showModelPicker, showPermMenu])
+  }, [showModelPicker, showPermMenu, showSkillMenu])
+
+  useEffect(() => {
+    if (!navOpen) return
+    const closeOnEscape = event => {
+      if (event.key === 'Escape') {
+        setNavOpen(false)
+        document.querySelector('.menu-btn')?.focus()
+      }
+    }
+    window.addEventListener('keydown', closeOnEscape)
+    return () => window.removeEventListener('keydown', closeOnEscape)
+  }, [navOpen])
 
   useEffect(() => {
     loadConfig()
@@ -310,9 +397,27 @@ export default function App() {
   }, [wsWidth])
 
   const openFile = useCallback((path) => {
-    setWsFile(path)
+    const root = (activeSession?.cwd || activeProject?.cwd || config?.cwd || '').replaceAll('\\', '/').replace(/\/$/, '')
+    let relative = path.replaceAll('\\', '/')
+    if (root && relative.toLowerCase().startsWith(root.toLowerCase() + '/')) relative = relative.slice(root.length + 1)
+    setWsFile(relative)
+    setOpenedFiles(files => files.includes(relative) ? files : [...files, relative])
     setWsOpen(true)
-  }, [])
+  }, [activeSession?.cwd, activeProject?.cwd, config?.cwd])
+
+  useEffect(() => {
+    const newFiles = artifacts.filter(file => !knownArtifacts.current.has(file.path))
+    const next = newFiles.find(file => /\.(md|markdown|html?)$/i.test(file.path)) || newFiles[0]
+    for (const file of artifacts) knownArtifacts.current.add(file.path)
+    const wideScreen = window.matchMedia('(min-width: 1101px)').matches
+    if (next && wideScreen && !wsFile) openFile(next.path)
+  }, [artifacts, openFile, wsFile])
+
+  const closeTab = path => {
+    const remaining = openedFiles.filter(file => file !== path)
+    setOpenedFiles(remaining)
+    if (wsFile === path) setWsFile(remaining.at(-1) || null)
+  }
 
   const closeFile = useCallback(() => setWsFile(null), [])
 
@@ -337,32 +442,57 @@ export default function App() {
       .catch((e) => {
         setError(
           e.status === 401
-            ? '认证失败：请确认右上角 AGENT_WEB_TOKEN 输入框已填写正确口令'
+            ? '访问口令已失效，请重新登录'
             : `加载会话列表失败: ${e.message}`,
         )
       })
+      .finally(() => setSessionsLoaded(true))
   }, [])
 
   useEffect(() => {
+    if (sessionsLoaded && current && !sessions.some(session => session.session_id === current)) {
+      setCurrent(null)
+    }
+  }, [sessionsLoaded, sessions, current])
+  useEffect(() => {
+    if (projectsLoaded && projectId && !projects.some(project => project.id === projectId)) {
+      setProjectId(null)
+    }
+  }, [projectsLoaded, projects, projectId])
+
+  useEffect(() => {
     refreshSessions()
+  }, [refreshSessions, token])
+  useEffect(() => {
+    const timer = setInterval(refreshSessions, 4000)
+    return () => clearInterval(timer)
   }, [refreshSessions])
 
   const newSession = useCallback(async () => {
     setError('')
     try {
-      const data = await api('/api/sessions', { method: 'POST' })
+      const data = await api('/api/sessions', { method: 'POST', body: JSON.stringify({ project_id: projectId }) })
+      setSessions(previous => [{
+        session_id: data.session_id,
+        project_id: data.project_id,
+        cwd: data.cwd,
+        title: '',
+        message_count: 0,
+        updated_at: new Date().toISOString(),
+        running: false,
+      }, ...previous.filter(session => session.session_id !== data.session_id)])
       setCurrent(data.session_id)
       setHistory(EMPTY_HISTORY)
       setPending(null)
       refreshSessions()
     } catch (e) {
       setError(
-        e.status === 401
-          ? '认证失败：请确认右上角 AGENT_WEB_TOKEN 输入框已填写正确口令'
+          e.status === 401
+          ? '访问口令已失效，请重新登录'
           : `创建会话失败: ${e.message}`,
       )
     }
-  }, [refreshSessions])
+  }, [refreshSessions, projectId])
 
   const startWith = useCallback(
     async (text) => {
@@ -386,6 +516,11 @@ export default function App() {
     setStopping(false)
     setPendingApproval(null)
   }, [])
+
+  const selectProject = id => {
+    setProjectId(id); setCurrent(null); setHistory([]); setPending(null); setWsFile(null)
+    setTaskFilter('all'); setTaskSearch(''); setNavOpen(false)
+  }
 
   const renameSession = useCallback(async (id, title) => {
     try {
@@ -478,12 +613,17 @@ export default function App() {
   }, [propsDraft, config, loadConfig, model])
 
   const switchModel = useCallback(async (modelName) => {
-    if (!modelName || modelName === model) {
+    if (!modelName || modelName === effectiveModel) {
       setShowModelPicker(false)
       return
     }
     setError('')
     try {
+      if (activeProject) {
+        await api(`/api/projects/${activeProject.id}`, { method: 'PUT', body: JSON.stringify({ ...activeProject, model: modelName }) })
+        await loadProjects(); setShowModelPicker(false)
+        return
+      }
       await api('/api/model/switch', {
         method: 'POST',
         body: JSON.stringify({ model: modelName }),
@@ -493,21 +633,42 @@ export default function App() {
     } catch (e) {
       setError(`切换模型失败: ${e.message}`)
     }
-  }, [model])
+  }, [effectiveModel, activeProject, loadProjects])
 
-  const addProvider = useCallback(async (name, apiKey, apiBase) => {
+  const addProvider = useCallback(async (provider) => {
     setError('')
     try {
       await api('/api/providers', {
         method: 'POST',
-        body: JSON.stringify({ name, api_key: apiKey, api_base: apiBase }),
+        body: JSON.stringify(provider),
       })
-      loadProviders()
-      loadConfig()
+      await Promise.all([loadProviders(), loadConfig()])
     } catch (e) {
       setError(`添加提供商失败: ${e.message}`)
+      throw e
     }
   }, [loadProviders, loadConfig])
+
+  const authenticate = useCallback(async (candidate) => {
+    sessionStorage.setItem('agent_web_token', candidate)
+    localStorage.removeItem('agent_web_token')
+    try {
+      const [sessionData, projectData] = await Promise.all([
+        api('/api/sessions'),
+        api('/api/projects'),
+      ])
+      setSessions(sessionData.sessions || [])
+      setProjects(projectData.projects || [])
+      setSessionsLoaded(true)
+      setProjectsLoaded(true)
+      setToken(candidate)
+      setAuthRequired(false)
+      setError('')
+    } catch (e) {
+      sessionStorage.removeItem('agent_web_token')
+      throw e
+    }
+  }, [])
 
   const removeProvider = useCallback(async (name) => {
     setError('')
@@ -538,9 +699,14 @@ export default function App() {
     }
   }, [propsDraft, config])
 
+  if (authRequired) return <AccessGate onAuthenticate={authenticate} />
+  if (!sessionsLoaded || !projectsLoaded) {
+    return <div className="boot-screen" role="status" aria-live="polite"><span className="jelly-cube wobble" aria-hidden="true" /><span>正在准备工作台…</span></div>
+  }
+
   return (
     <div className={`layout${navOpen ? ' nav-open' : ''}${wsOpen ? ' ws-open' : ''}`}>
-      <aside className="sidebar">
+      <aside className="sidebar" id="workspace-navigation" aria-label="项目与任务">
         <div className="sidebar-header">
           <div className="brand">
             <span className="jelly-cube brand-cube" aria-hidden="true" />
@@ -550,12 +716,25 @@ export default function App() {
             </span>
           </div>
         </div>
-        <button className="new-chat" onClick={newSession}>
-          <Icon.plus /> 新建作品
+        <button className="workspace-selector" onClick={() => activeProject ? setProjectDialog(activeProject) : setProjectDialog({})}>
+          <span className="workspace-monogram">{(activeProject?.name || 'J').slice(0, 1)}</span><span>{activeProject?.name || '我的工作空间'}</span><Icon.chevron />
         </button>
-        <div className="session-label">工作记录</div>
+        <button className="new-chat" onClick={() => projectsLoaded && !projects.length ? setProjectDialog({}) : newSession()}>
+          <Icon.plus /> 新建任务 <kbd>＋</kbd>
+        </button>
+        <nav className="main-navigation" aria-label="工作空间导航">
+          <button className={!projectId && taskFilter === 'all' ? 'active' : ''} onClick={() => selectProject(null)}><Icon.folder /><span>工作台</span><small>{sessions.length}</small></button>
+          <button className={taskFilter === 'running' ? 'active' : ''} onClick={() => setTaskFilter(f => f === 'running' ? 'all' : 'running')}><span className="nav-spinner">◌</span><span>进行中的任务</span><small>{sessions.filter(s => s.running).length}</small></button>
+        </nav>
+        <label className="task-search"><span>⌕</span><input aria-label="搜索任务" placeholder="搜索任务" value={taskSearch} onChange={e => setTaskSearch(e.target.value)} /></label>
+        <div className="nav-section-heading"><span>项目</span><button className="quiet-button" aria-label="新建项目" onClick={() => setProjectDialog({})}>＋</button></div>
+        <nav className="project-list" aria-label="项目">
+          {projects.map(project => <button key={project.id} className={projectId === project.id ? 'active' : ''} onClick={() => selectProject(project.id)}><Icon.folder /><span>{project.name}</span><small>{sessions.filter(s => s.project_id === project.id).length}</small></button>)}
+          {!projects.length && <button className="create-project-link" onClick={() => setProjectDialog({})}>创建第一个项目 ↗</button>}
+        </nav>
+        <div className="nav-section-heading"><span>{taskFilter === 'running' ? '进行中' : '最近任务'}</span><span>{visibleSessions.length}</span></div>
         <ul className="session-list">
-          {sessions.map((s) => (
+          {visibleSessions.map((s) => (
             <SessionItem
               key={s.session_id}
               s={s}
@@ -566,84 +745,29 @@ export default function App() {
             />
           ))}
         </ul>
-        {sessions.length === 0 && <div className="empty-sessions">暂无会话<br />点击上方「新建作品」开始</div>}
+        {visibleSessions.length === 0 && <div className="empty-sessions">这里还没有任务<br />从一个想法开始。</div>}
+        <div className="sidebar-bottom"><span className="sidebar-status"><i /> 本地工作空间</span><button onClick={() => setShowSettings(true)}><Icon.gear /> 设置与连接</button></div>
       </aside>
-      <div className="nav-backdrop" onClick={() => setNavOpen(false)} />
+      <button type="button" className="nav-backdrop" aria-label="关闭项目与任务导航" onClick={() => setNavOpen(false)} />
 
       <main className="chat">
         <header className="chat-header">
           <div className="header-left">
-            <button className="menu-btn" aria-label="打开会话列表" onClick={() => setNavOpen(true)}>
+            <button className="menu-btn" aria-label="打开会话列表" aria-expanded={navOpen} aria-controls="workspace-navigation" onClick={() => setNavOpen(true)}>
               <Icon.menu />
             </button>
-            <span className="chat-title">
-              {sessions.find(s => s.session_id === current)?.title || '我的工作室'}
-            </span>
+            <div className="task-heading"><span className="task-breadcrumb">{activeProject?.name || '工作空间'} <span> / </span> 任务</span><span className="chat-title">{activeSession?.title || (activeProject ? '开始一件新的作品' : '我的工作室')}</span></div>
           </div>
           <div className="header-right">
+            <span className={`task-state ${pendingApproval ? 'awaiting' : busy ? 'working' : ''}`}><i />{pendingApproval ? '等待确认' : stopping ? '正在停止' : busy ? '进行中' : current && history.length ? '已就绪' : '准备开始'}</span>
             <button className="theme-button" aria-label="切换明暗主题" title="切换明暗主题" onClick={() => setTheme(t => t === 'light' ? 'dark' : 'light')}>{theme === 'light' ? '◐' : '☼'}</button>
-            {model && (
-              <div className="model-picker" ref={modelPickerRef}>
-                <button
-                  className="model-picker-btn"
-                  onClick={() => setShowModelPicker(!showModelPicker)}
-                  title="点击切换模型"
-                >
-                  <span className="model-name">{model.split('/').pop() || model}</span>
-                  <span className="model-provider">{model.split('/')[0]}</span>
-                  <span className="dropdown-arrow"><Icon.chevron /></span>
-                </button>
-                {showModelPicker && (
-                  <div className="model-dropdown">
-                    {providers.length === 0 ? (
-                      <div className="dropdown-empty">暂无提供商，请先配置 API Key</div>
-                    ) : (
-                      providers.map((p) => (
-                        <div className="dropdown-group" key={p.name}>
-                          <div className="dropdown-group-label">{p.name}</div>
-                          {(allModels[p.name] || []).map((m) => (
-                            <button
-                              key={m}
-                              className={`dropdown-item ${m === model ? 'active' : ''}`}
-                              onClick={() => switchModel(m)}
-                            >
-                              <span className="item-model">{m.split('/').pop()}</span>
-                              {m === model && <span className="item-check"><Icon.check /></span>}
-                            </button>
-                          ))}
-                          {(allModels[p.name] || []).length === 0 && (
-                            <div className="dropdown-empty-small">输入自定义模型名</div>
-                          )}
-                          <div className="dropdown-custom">
-                            <input
-                              type="text"
-                              placeholder="自定义模型名 (如 qwen3.5:latest)"
-                              onKeyDown={(e) => {
-                                if (e.key === 'Enter') {
-                                  const v = e.target.value.trim()
-                                  const prefix =
-                                    (allModels[p.name] || [])[0]?.split('/')[0] || p.name
-                                  if (v) switchModel(`${prefix}/${v}`)
-                                }
-                              }}
-                            />
-                          </div>
-                        </div>
-                      ))
-                    )}
-                    <div className="dropdown-footer">
-                      <button onClick={() => { setShowModelPicker(false); setShowSettings(true) }}>
-                        管理提供商
-                      </button>
-                    </div>
-                  </div>
-                )}
-              </div>
-            )}
+
             <button
               className={`ws-toggle${wsOpen ? ' active' : ''}`}
               title="工作台：文件树与预览"
               aria-label="工作台：文件树与预览"
+              aria-expanded={wsOpen}
+              aria-controls="artifact-workspace"
               onClick={() => setWsOpen(!wsOpen)}
             >
               <Icon.folder />
@@ -651,6 +775,7 @@ export default function App() {
             <button className="settings-btn" title="模型与 API Key 设置" aria-label="模型与 API Key 设置" onClick={() => setShowSettings(true)}>
               <Icon.gear />
             </button>
+            {token && <button className="auth-button" title="锁定工作台并更换访问口令" aria-label="锁定工作台并更换访问口令" onClick={lockWorkspace}>钥</button>}
             {usage && (
               <div className="usage-badge" title={`模型: ${usage.model}\n缓存命中率: ${usage.cache_read_tokens}/${usage.prompt_tokens}`}>
                 <span className="usage-tokens">
@@ -665,9 +790,40 @@ export default function App() {
             )}
           </div>
         </header>
-        {error && <div className="error-banner">{error}</div>}
-        <div className="messages" ref={messagesRef} onScroll={e => { const el = e.currentTarget; followOutput.current = el.scrollHeight - el.scrollTop - el.clientHeight < 100 }}>
-          {history.length === 0 && !pending && (
+        <div className="conversation-tabs" role="tablist" aria-label="任务内容" onKeyDown={handleTabListKeyDown}>
+          <button id="task-tab-chat" role="tab" tabIndex={conversationTab === 'chat' ? 0 : -1} aria-selected={conversationTab === 'chat'} aria-controls="task-panel" onClick={() => setConversationTab('chat')}>对话</button>
+          <button id="task-tab-execution" role="tab" tabIndex={conversationTab === 'execution' ? 0 : -1} aria-selected={conversationTab === 'execution'} aria-controls="task-panel" onClick={() => setConversationTab('execution')}>执行记录 <small>{allCalls.length}</small></button>
+          <button id="task-tab-files" role="tab" tabIndex={conversationTab === 'files' ? 0 : -1} aria-selected={conversationTab === 'files'} aria-controls="task-panel" onClick={() => setConversationTab('files')}>文件 <small>{artifacts.length}</small></button>
+          <span className="project-context" title={activeSession?.cwd || activeProject?.cwd || config?.cwd}><Icon.folder />{activeProject?.name || '本地目录'}</span>
+        </div>
+        {error && <div className="error-banner" role="alert"><span>{error}</span><button aria-label="关闭错误提示" onClick={() => setError('')}>×</button></div>}
+        <div
+          className="messages"
+          id="task-panel"
+          role="tabpanel"
+          aria-labelledby={`task-tab-${conversationTab}`}
+          aria-busy={busy}
+          ref={messagesRef}
+          onScroll={e => { const el = e.currentTarget; followOutput.current = el.scrollHeight - el.scrollTop - el.clientHeight < 100 }}
+        >
+          {projectsLoaded && projects.length === 0 && !current && conversationTab === 'chat' ? (
+            <div className="empty-state onboarding-state">
+              <div className="onboarding-card">
+                <span className="eyebrow">WELCOME TO JELLY</span>
+                <h1>先给工作一个安静的空间。</h1>
+                <p>绑定一个本地目录。之后的任务、对话、文件与版本都会留在这个项目里。</p>
+                <ol>
+                  <li><span>01</span><div><strong>创建项目</strong><small>选择已有目录，文件始终由你保管</small></div></li>
+                  <li><span>02</span><div><strong>说清目标</strong><small>果冻会边执行边留下可检查的记录</small></div></li>
+                  <li><span>03</span><div><strong>直接看成果</strong><small>文档、代码与网页会在右侧自动打开</small></div></li>
+                </ol>
+                <div className="onboarding-actions">
+                  <button className="solid-button" onClick={() => setProjectDialog({})}>创建第一个项目</button>
+                  <button className="quiet-button" onClick={() => setShowSettings(true)}>设置模型连接</button>
+                </div>
+              </div>
+            </div>
+          ) : history.length === 0 && !pending && conversationTab === 'chat' && (
             <div className="empty-state">
               <div>
                 <span className="jelly-cube empty-cube" aria-hidden="true" />
@@ -688,15 +844,12 @@ export default function App() {
             </div>
           )}
           <div className="thread">
-            {history
-              .filter((m) => m.role !== 'tool')
-              .map((m, i) => (
-                <Message key={i} msg={m} onOpenFile={openFile} />
-              ))}
-            {pending && <Message msg={pending} thinking={busy} onOpenFile={openFile} />}
+            {conversationTab === 'chat' && <Conversation history={history} pending={pending} artifacts={artifacts} busy={busy} onOpenFile={openFile} activeFile={wsFile} />}
+            {conversationTab === 'execution' && <><div className="view-heading"><span className="eyebrow">ACTIVITY</span><h2>每一步，清晰可见。</h2><p>展开一条记录，查看实际输入和执行结果。</p></div>{allCalls.length ? <ExecutionList calls={allCalls} /> : <p className="pane-empty">还没有工具执行记录。</p>}</>}
+            {conversationTab === 'files' && <><div className="view-heading"><span className="eyebrow">DELIVERABLES</span><h2>这次合作的成果</h2><p>选择一个文件，在旁边继续查看和打磨。</p></div><Artifacts artifacts={artifacts} onOpenFile={openFile} activeFile={wsFile} />{!artifacts.length && <p className="pane-empty">任务创建或修改的文件会出现在这里。</p>}{artifactState.error && <p role="alert" className="form-error">{artifactState.error}</p>}</>}
             {pendingApproval && <ApprovalCard approval={pendingApproval} onDecide={decideApproval} />}
             {status && (
-              <div className="status">
+              <div className="status" aria-hidden="true">
                 <span className="status-dot" />
                 {status}
               </div>
@@ -746,35 +899,62 @@ export default function App() {
             />
             <div className="composer-toolbar">
               <div className="toolbar-left">
-                <div className={`perm-picker perm-mode-${permMode}`} ref={permMenuRef}>
+                <div className={`perm-picker perm-mode-${effectivePermission}`} ref={permMenuRef}>
                   <button
                     className="perm-btn"
                     title="权限模式"
                     aria-label="权限模式"
+                    aria-haspopup="menu"
+                    aria-expanded={showPermMenu}
+                    aria-controls="permission-menu"
                     onClick={() => setShowPermMenu(!showPermMenu)}
+                    onKeyDown={event => {
+                      if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+                        event.preventDefault()
+                        setShowPermMenu(true)
+                        focusMenuItem(permMenuRef.current, event.key === 'ArrowUp' ? 'last' : 'first')
+                      } else if (event.key === 'Escape') {
+                        setShowPermMenu(false)
+                      }
+                    }}
                   >
-                    <PermCurrentIcon mode={permMode} />
+                    <PermCurrentIcon mode={effectivePermission} />
                     <span className="perm-btn-label">
-                      {PERMISSION_MODES.find((m) => m.value === permMode)?.label || '手动审批'}
+                      {PERMISSION_MODES.find((m) => m.value === effectivePermission)?.label || '手动审批'}
                     </span>
                     <span className="perm-arrow"><Icon.chevron /></span>
                   </button>
                   {showPermMenu && (
-                    <div className="perm-popup">
+                    <div
+                      className="perm-popup"
+                      id="permission-menu"
+                      role="menu"
+                      aria-label="执行权限"
+                      onKeyDown={event => handleMenuKeyDown(event, () => {
+                        setShowPermMenu(false)
+                        permMenuRef.current?.querySelector('.perm-btn')?.focus()
+                      })}
+                    >
                       {PERMISSION_MODES.map((m) => {
                         const IconCmp = PERM_ICONS[m.icon] || Icon.shield
                         return (
                           <button
                             key={m.value}
-                            className={`perm-option ${m.value === permMode ? 'active' : ''}`}
-                            onClick={() => changePermission(m.value)}
+                            className={`perm-option ${m.value === effectivePermission ? 'active' : ''}`}
+                            role="menuitemradio"
+                            aria-checked={m.value === effectivePermission}
+                            tabIndex={m.value === effectivePermission ? 0 : -1}
+                            onClick={() => {
+                              changePermission(m.value)
+                              requestAnimationFrame(() => permMenuRef.current?.querySelector('.perm-btn')?.focus())
+                            }}
                           >
                             <span className="perm-option-icon"><IconCmp /></span>
                             <span className="perm-option-text">
                               <span className="perm-option-label">{m.label}</span>
                               <span className="perm-option-desc">{m.desc}</span>
                             </span>
-                            {m.value === permMode && (
+                            {m.value === effectivePermission && (
                               <span className="perm-option-check"><Icon.check /></span>
                             )}
                           </button>
@@ -783,23 +963,137 @@ export default function App() {
                     </div>
                   )}
                 </div>
-                <div className="skill-btn-wrapper">
-                  <button className="toolbar-btn skill-btn" title="Skill 命令" aria-label="Skill 命令" disabled={skills.length === 0}>
+            {effectiveModel && (
+              <div className="model-picker" ref={modelPickerRef}>
+                <button
+                  className="model-picker-btn"
+                  onClick={() => setShowModelPicker(!showModelPicker)}
+                  title="点击切换模型"
+                  aria-haspopup="dialog"
+                  aria-expanded={showModelPicker}
+                  aria-controls="model-picker-dialog"
+                  onKeyDown={event => {
+                    if (event.key === 'ArrowDown') {
+                      event.preventDefault()
+                      setShowModelPicker(true)
+                      requestAnimationFrame(() => modelPickerRef.current?.querySelector('.dropdown-item, .dropdown-custom input, .dropdown-footer button')?.focus())
+                    } else if (event.key === 'Escape') {
+                      setShowModelPicker(false)
+                    }
+                  }}
+                >
+                  <span className="model-name">{effectiveModel.split('/').pop() || effectiveModel}</span>
+                  <span className="model-provider">{effectiveModel.split('/')[0]}</span>
+                  <span className="dropdown-arrow"><Icon.chevron /></span>
+                </button>
+                {showModelPicker && (
+                  <div
+                    className="model-dropdown"
+                    id="model-picker-dialog"
+                    role="dialog"
+                    aria-label="选择模型"
+                    onKeyDown={event => {
+                      if (event.key === 'Escape') {
+                        event.preventDefault()
+                        setShowModelPicker(false)
+                        modelPickerRef.current?.querySelector('.model-picker-btn')?.focus()
+                      }
+                    }}
+                  >
+                    {providers.length === 0 ? (
+                      <div className="dropdown-empty">暂无提供商，请先配置 API Key</div>
+                    ) : (
+                      providers.map((p) => (
+                        <div className="dropdown-group" key={p.name}>
+                          <div className="dropdown-group-label">{p.name}</div>
+                          {(allModels[p.name] || []).map((m) => (
+                            <button
+                              key={m}
+                              className={`dropdown-item ${m === effectiveModel ? 'active' : ''}`}
+                              onClick={() => switchModel(m)}
+                            >
+                              <span className="item-model">{m.split('/').pop()}</span>
+                              {m === effectiveModel && <span className="item-check"><Icon.check /></span>}
+                            </button>
+                          ))}
+                          {(allModels[p.name] || []).length === 0 && (
+                            <div className="dropdown-empty-small">输入自定义模型名</div>
+                          )}
+                          <div className="dropdown-custom">
+                            <input
+                              type="text"
+                              placeholder="自定义模型名 (如 qwen3.5:latest)"
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter') {
+                                  const v = e.target.value.trim()
+                                  const prefix =
+                                    (allModels[p.name] || [])[0]?.split('/')[0] || p.name
+                                  if (v) switchModel(`${prefix}/${v}`)
+                                }
+                              }}
+                            />
+                          </div>
+                        </div>
+                      ))
+                    )}
+                    <div className="dropdown-footer">
+                      <button onClick={() => { setShowModelPicker(false); setShowSettings(true) }}>
+                        管理提供商
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+                <div className="skill-btn-wrapper" ref={skillMenuRef}>
+                  <button
+                    className="toolbar-btn skill-btn"
+                    title="Skill 命令"
+                    aria-label="Skill 命令"
+                    aria-haspopup="menu"
+                    aria-expanded={showSkillMenu}
+                    aria-controls="skill-menu"
+                    disabled={skills.length === 0}
+                    onClick={() => setShowSkillMenu(value => !value)}
+                    onKeyDown={event => {
+                      if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+                        event.preventDefault()
+                        setShowSkillMenu(true)
+                        focusMenuItem(skillMenuRef.current, event.key === 'ArrowUp' ? 'last' : 'first')
+                      } else if (event.key === 'Escape') {
+                        setShowSkillMenu(false)
+                      }
+                    }}
+                  >
                     <Icon.zap />
                   </button>
-                  {skills.length > 0 && (
-                  <div className="skill-popup">
-                    {skills.map((s) => (
-                      <div
+                  {skills.length > 0 && showSkillMenu && (
+                  <div
+                    className="skill-popup"
+                    id="skill-menu"
+                    role="menu"
+                    aria-label="Skill 命令"
+                    onKeyDown={event => handleMenuKeyDown(event, () => {
+                      setShowSkillMenu(false)
+                      skillMenuRef.current?.querySelector('.skill-btn')?.focus()
+                    })}
+                  >
+                    {skills.map((s, index) => (
+                      <button
+                        type="button"
                         key={s.name}
                         className="skill-item"
+                        role="menuitem"
+                        tabIndex={index === 0 ? 0 : -1}
                         onClick={() => {
                           setDraft(s.triggers[0] + ' ')
+                          setShowSkillMenu(false)
+                          requestAnimationFrame(() => draftRef.current?.focus())
                       }}
                       >
                         <span className="skill-item-name">{s.name}</span>
                         <span className="skill-item-desc">{s.description}</span>
-                      </div>
+                      </button>
                     ))}
                   </div>
                   )}
@@ -824,14 +1118,24 @@ export default function App() {
               </div>
             </div>
           </div>
+          <div className="composer-footnote"><span>{activeProject?.name || 'Jelly Studio'} · 你的工作，由你掌控</span><span>Enter 发送 · Shift + Enter 换行</span></div>
+        </div>
+        <div className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+          {pendingApproval ? '任务已暂停，等待权限确认。' : stopping ? '正在停止任务。' : busy ? (status || '任务正在进行。') : current && history.length ? '任务已完成，可以继续输入。' : ''}
         </div>
         </main>
       {wsOpen && (
         <>
-          <div className="ws-backdrop" onClick={() => setWsOpen(false)} />
-          <aside className="workspace-panel" style={{ width: wsWidth }}>
+          <button type="button" className="ws-backdrop" aria-label="关闭文件预览" onClick={() => setWsOpen(false)} />
+          <aside className="workspace-panel" id="artifact-workspace" aria-label="文件预览与版本" style={{ width: wsWidth }}>
             <div className="ws-resizer" onPointerDown={startWsResize} aria-hidden="true" />
             <Workspace
+              key={`${current || projectId || 'default'}:${token}`}
+              scope={scope}
+              artifacts={artifacts}
+              openedFiles={openedFiles}
+              onCloseTab={closeTab}
+              onRestored={() => setArtifactRevision(n => n + 1)}
               sessionId={current}
               onUseRecipe={startWith}
               recipeSeed={history.filter(m => m.role === 'user').at(-1)?.content || ''}
@@ -844,6 +1148,7 @@ export default function App() {
           </aside>
         </>
       )}
+      {projectDialog && <ProjectDialog project={projectDialog.id ? projectDialog : null} onClose={() => setProjectDialog(null)} onSaved={async project => { setProjectDialog(null); await loadProjects(); if (!projectDialog.id) selectProject(project.id) }} />}
       {showSettings && (
         <SettingsModal
           config={config}
@@ -887,7 +1192,7 @@ function SessionItem({ s, active, onOpen, onRename, onDelete }) {
   }
 
   return (
-    <li className={active ? 'active' : ''} onClick={() => !editing && onOpen(s.session_id)}>
+    <li className={`session-item${active ? ' active' : ''}`}>
       {editing ? (
         <input
           ref={inputRef}
@@ -895,7 +1200,6 @@ function SessionItem({ s, active, onOpen, onRename, onDelete }) {
           value={draft}
           maxLength={64}
           onChange={(e) => setDraft(e.target.value)}
-          onClick={(e) => e.stopPropagation()}
           onBlur={commit}
           onKeyDown={(e) => {
             if (e.key === 'Enter') commit()
@@ -904,22 +1208,30 @@ function SessionItem({ s, active, onOpen, onRename, onDelete }) {
         />
       ) : (
         <>
-          <span className="session-title">{s.title || `会话 ${s.session_id.slice(0, 8)}`}</span>
-          <span className="session-meta">
-            {s.updated_at ? s.updated_at.slice(5, 16).replace('T', ' ') : ''} · {s.message_count} 条
+          <button
+            type="button"
+            className="session-open"
+            aria-current={active ? 'page' : undefined}
+            onClick={() => onOpen(s.session_id)}
+          >
+            <span className="session-title">{s.title || `会话 ${s.session_id.slice(0, 8)}`}</span>
+            <span className="session-meta">{s.updated_at ? s.updated_at.slice(5, 16).replace('T', ' ') : ''} · {s.message_count} 条</span>
+          </button>
+          <span className="session-actions">
             <button
+              type="button"
               className="rename-btn"
               title="重命名会话"
-              onClick={(e) => {
-                e.stopPropagation()
-                startEdit()
-              }}
+              aria-label={`重命名 ${s.title || '会话'}`}
+              onClick={startEdit}
             >
               <Icon.pencil />
             </button>
             <button
+              type="button"
               className="delete-btn"
               title="删除会话"
+              aria-label={`删除 ${s.title || '会话'}`}
               onClick={handleDelete}
             >
               <Icon.trash />
@@ -931,61 +1243,45 @@ function SessionItem({ s, active, onOpen, onRename, onDelete }) {
   )
 }
 
-function toolSummary(tc) {
-  const args = tc.arguments || {}
-  const s = (v) => (typeof v === 'string' ? v : v == null ? '' : JSON.stringify(v))
-  switch (tc.name) {
-    case 'web_fetch':
-      return s(args.url) || '抓取网页'
-    case 'bash':
-      return `$ ${s(args.command)}`
-    case 'read':
-      return s(args.path) || '读取文件'
-    case 'write':
-      return s(args.path) || '写入文件'
-    case 'edit':
-      return s(args.path) || '修改文件'
-    case 'ls':
-      return s(args.path) || '.'
-    case 'glob':
-    case 'grep':
-      return args.path ? `${s(args.pattern)} @ ${s(args.path)}` : s(args.pattern)
-    case 'todo_add':
-      return s(args.content) || '添加待办'
-    case 'todo_done':
-      return s(args.todo_id) || '完成待办'
-    case 'todo_list':
-      return '查看待办列表'
-    default:
-      return Object.entries(args)
-        .map(([k, v]) => `${k}=${s(v)}`)
-        .join(' ')
-  }
-}
-
 function SettingsModal({ config, draft, testing, onChange, onSave, onTest, onClose, onAddProvider, onRemoveProvider }) {
   const providers = draft.providers || {}
   const test = config?.test
   const [showAddProvider, setShowAddProvider] = useState(false)
   const [newProvider, setNewProvider] = useState({ name: '', api_key: '', api_base: '', default_model: '' })
+  const modalRef = useRef(null)
+  useEffect(() => {
+    const previousFocus = document.activeElement
+    const handleKeyDown = event => {
+      if (event.key === 'Escape') onClose()
+      else keepFocusInside(event, modalRef.current)
+    }
+    document.addEventListener('keydown', handleKeyDown)
+    modalRef.current?.focus()
+    return () => {
+      document.removeEventListener('keydown', handleKeyDown)
+      if (previousFocus instanceof HTMLElement && previousFocus.isConnected) previousFocus.focus()
+    }
+  }, [])
 
-  const handleAddProvider = () => {
+  const handleAddProvider = async () => {
     if (!newProvider.name.trim()) return
-    onAddProvider({
-      name: newProvider.name.trim(),
-      api_key: newProvider.api_key.trim() || undefined,
-      api_base: newProvider.api_base.trim() || undefined,
-      default_model: newProvider.default_model.trim() || undefined,
-    })
-    setNewProvider({ name: '', api_key: '', api_base: '', default_model: '' })
-    setShowAddProvider(false)
+    try {
+      await onAddProvider({
+        name: newProvider.name.trim(),
+        api_key: newProvider.api_key.trim() || undefined,
+        api_base: newProvider.api_base.trim() || undefined,
+        default_model: newProvider.default_model.trim() || undefined,
+      })
+      setNewProvider({ name: '', api_key: '', api_base: '', default_model: '' })
+      setShowAddProvider(false)
+    } catch { /* 父组件展示错误，保留表单便于修正 */ }
   }
 
   return (
     <div className="modal-overlay" onClick={onClose}>
-      <div className="settings-modal" onClick={(e) => e.stopPropagation()}>
+      <div className="settings-modal" ref={modalRef} role="dialog" aria-modal="true" aria-labelledby="settings-title" tabIndex={-1} onClick={(e) => e.stopPropagation()}>
         <div className="modal-head">
-          <span className="modal-title"><Icon.gear /> 模型与 API Key</span>
+          <span className="modal-title" id="settings-title"><Icon.gear /> 模型与 API Key</span>
           <button className="modal-close" aria-label="关闭设置" onClick={onClose}><Icon.close /></button>
         </div>
 
@@ -994,6 +1290,7 @@ function SettingsModal({ config, draft, testing, onChange, onSave, onTest, onClo
           <input
             type="text"
             className="field-input"
+            aria-label="当前模型"
             placeholder="openai/gpt-4o-mini"
             value={draft.model}
             onChange={(e) => onChange({ ...draft, model: e.target.value })}
@@ -1005,6 +1302,7 @@ function SettingsModal({ config, draft, testing, onChange, onSave, onTest, onClo
           <input
             type="text"
             className="field-input"
+            aria-label="全局工作目录"
             placeholder="D:/work/project"
             value={draft.cwd}
             onChange={(e) => onChange({ ...draft, cwd: e.target.value })}
@@ -1028,6 +1326,7 @@ function SettingsModal({ config, draft, testing, onChange, onSave, onTest, onClo
               <input
                 type="text"
                 className="field-input"
+                aria-label="提供商名称"
                 placeholder="提供商名（如 openai, deepseek, anthropic）"
                 value={newProvider.name}
                 onChange={(e) => setNewProvider({ ...newProvider, name: e.target.value })}
@@ -1035,6 +1334,7 @@ function SettingsModal({ config, draft, testing, onChange, onSave, onTest, onClo
               <input
                 type="password"
                 className="field-input"
+                aria-label="新提供商 API Key"
                 placeholder="API Key"
                 value={newProvider.api_key}
                 onChange={(e) => setNewProvider({ ...newProvider, api_key: e.target.value })}
@@ -1042,6 +1342,7 @@ function SettingsModal({ config, draft, testing, onChange, onSave, onTest, onClo
               <input
                 type="text"
                 className="field-input"
+                aria-label="新提供商 Base URL"
                 placeholder="Base URL（可选，如 https://api.deepseek.com）"
                 value={newProvider.api_base}
                 onChange={(e) => setNewProvider({ ...newProvider, api_base: e.target.value })}
@@ -1049,6 +1350,7 @@ function SettingsModal({ config, draft, testing, onChange, onSave, onTest, onClo
               <input
                 type="text"
                 className="field-input"
+                aria-label="新提供商默认模型"
                 placeholder="默认模型（可选，如 gpt-4o-mini）"
                 value={newProvider.default_model}
                 onChange={(e) => setNewProvider({ ...newProvider, default_model: e.target.value })}
@@ -1086,6 +1388,7 @@ function SettingsModal({ config, draft, testing, onChange, onSave, onTest, onClo
                 <input
                   type="password"
                   className="field-input"
+                  aria-label={`${name} API Key`}
                   placeholder="API Key（留空则不修改）"
                   value={p.api_key}
                   onChange={(e) =>
@@ -1098,6 +1401,7 @@ function SettingsModal({ config, draft, testing, onChange, onSave, onTest, onClo
                 <input
                   type="text"
                   className="field-input"
+                  aria-label={`${name} Base URL`}
                   placeholder="Base URL（可选，如 https://api.deepseek.com）"
                   value={p.api_base}
                   onChange={(e) =>
@@ -1127,104 +1431,6 @@ function SettingsModal({ config, draft, testing, onChange, onSave, onTest, onClo
           </button>
           <button className="btn plain" onClick={onClose}>关闭</button>
         </div>
-      </div>
-    </div>
-  )
-}
-
-function Message({ msg, thinking, onOpenFile }) {
-  const isUser = msg.role === 'user'
-  const [expanded, setExpanded] = useState(() => new Set())
-  const [userToggled, setUserToggled] = useState(() => new Set())
-  const calls = msg.tool_calls || []
-
-  const isOpen = (i) => {
-    const tc = calls[i]
-    return expanded.has(i) || (tc.status === 'running' && !userToggled.has(i))
-  }
-
-  const allOpen = calls.length > 0 && calls.every((_, i) => isOpen(i))
-
-  const toggle = (i) => {
-    setUserToggled((prev) => new Set(prev).add(i))
-    setExpanded((prev) => {
-      const next = new Set(prev)
-      if (next.has(i)) next.delete(i)
-      else next.add(i)
-      return next
-    })
-  }
-
-  const toggleAll = () => {
-    const all = new Set(calls.map((_, i) => i))
-    setUserToggled(all)
-    setExpanded(allOpen ? new Set() : all)
-  }
-
-  return (
-    <div className={`msg ${isUser ? 'user' : 'assistant'}`}>
-      <div className={`avatar ${isUser ? 'me' : 'ai'}`}>
-        {isUser ? '我' : <span className={`jelly-cube${thinking ? ' wobble' : ''}`} aria-hidden="true" />}
-      </div>
-      <div className="msg-body">
-        {calls.length > 0 && (
-          <div className="tool-calls">
-            {calls.length > 1 && (
-              <button className="tool-toggle-all" onClick={toggleAll}>
-                {allOpen ? '收起全部' : '展开全部'}
-              </button>
-            )}
-            {calls.map((tc, i) => {
-              const open = isOpen(i)
-              const done = tc.status == null || tc.status === 'done'
-              const statusText = tc.status === 'error' ? '出错' : done ? '完成' : '运行中'
-              const cardClass = tc.status === 'error' ? 'error' : done ? 'done' : 'running'
-              const args = tc.arguments || {}
-              const pathArg = args && typeof args.path === 'string' ? args.path : ''
-              return (
-                <div key={i} className={`tool-card ${cardClass}`}>
-                  <div className="tool-head" onClick={() => toggle(i)}>
-                    <div className="tool-head-left">
-                      <span className={`tool-arrow ${open ? 'open' : ''}`}>▶</span>
-                      <ToolIcon name={tc.name} />
-                      <span className="tool-name">{tc.name}</span>
-                      {pathArg && onOpenFile ? (
-                        <button
-                          className="file-link tool-path"
-                          title="在右侧预览该文件"
-                          onClick={(e) => {
-                            e.stopPropagation()
-                            onOpenFile(pathArg)
-                          }}
-                        >
-                          {pathArg}
-                        </button>
-                      ) : (
-                        <span className="tool-summary">{toolSummary(tc)}</span>
-                      )}
-                    </div>
-                    <span className="tool-status">{statusText}</span>
-                  </div>
-                  <div className={`tool-collapse ${open ? 'open' : ''}`}>
-                    <div className="tool-collapse-inner">
-                      <pre className="tool-args">
-                        {typeof tc.arguments === 'string'
-                          ? tc.arguments
-                          : JSON.stringify(tc.arguments, null, 2)}
-                      </pre>
-                      {tc.output != null && <pre className="tool-output">{tc.output}</pre>}
-                    </div>
-                  </div>
-                </div>
-              )
-            })}
-          </div>
-        )}
-        {msg.content && (
-          <div className="bubble">
-            {isUser ? msg.content : <Markdown text={msg.content} onOpenFile={onOpenFile} />}
-          </div>
-        )}
       </div>
     </div>
   )

@@ -165,10 +165,10 @@ class LLMClient:
             os.environ.get(f"{prefix}_API_BASE"),
         )
 
-    def snapshot(self) -> LLMClient:
+    def snapshot(self, model: str | None = None) -> LLMClient:
         """Freeze the model and credentials for one run without writing configuration."""
         client = copy(self)
-        client._resolved_snapshot = self._resolve()
+        client._resolved_snapshot = self._resolve(model)
         client._fallback_model = client._resolved_snapshot[0]
         client._store = None
         return client

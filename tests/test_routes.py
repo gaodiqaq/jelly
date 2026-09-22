@@ -8,6 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from agent_shell.config import PermissionsConfig, Settings
+from agent_shell.errors import ConfigError
 from agent_shell.runtime import ProviderStore
 from agent_shell.server import app as app_module
 from agent_shell.server.app import create_app
@@ -163,3 +164,22 @@ def test_auth_rejects_unknown_token(
     assert client.get("/api/sessions", headers={"Authorization": "Bearer nope"}).status_code == 401
     assert client.get("/api/sessions").status_code == 401
     assert client.get("/api/config", headers={"Authorization": "Bearer tok-a"}).status_code == 200
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "../escape:token",
+        "alice:",
+        "missing-separator",
+        "alice:same,bob:same",
+    ],
+)
+def test_users_config_rejects_unsafe_or_ambiguous_entries(
+    monkeypatch: pytest.MonkeyPatch, raw: str
+) -> None:
+    monkeypatch.setenv("AGENT_WEB_USERS", raw)
+    monkeypatch.delenv("AGENT_WEB_TOKEN", raising=False)
+
+    with pytest.raises(ConfigError):
+        app_module._parse_users()

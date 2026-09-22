@@ -1,31 +1,26 @@
 @echo off
 chcp 65001 >nul
-echo ============================================
-echo    Jelly - Qwen3.6 本地模型
-echo ============================================
-echo.
+setlocal
+cd /d "%~dp0"
 
-cd /d D:\Agent-learning\jelly
+if not defined AGENT_WEB_TOKEN (
+    echo Please set AGENT_WEB_TOKEN before starting Jelly.
+    exit /b 1
+)
+if not defined JELLY_QWEN_BASE_URL (
+    echo Please set JELLY_QWEN_BASE_URL, for example http://127.0.0.1:8001/v1
+    exit /b 1
+)
 
-echo [1/2] 启动 Jelly Web 服务...
-start "Jelly Web" cmd /k "agent web --host 0.0.0.0 --port 8000"
+echo Starting Jelly with the configured local model endpoint...
+start "Jelly Web" /b ".venv\Scripts\agent.exe" web --host 127.0.0.1 --port 8000
+timeout /t 3 /nobreak >nul
 
-echo.
-echo [2/2] 等待服务启动...
-timeout /t 5 /nobreak >nul
-
-echo.
-echo [3/3] 配置 OpenAI Provider API Base...
-curl -s -X PUT http://localhost:8000/api/config ^
+curl --fail --silent --show-error -X PUT http://127.0.0.1:8000/api/config ^
   -H "Content-Type: application/json" ^
-  -H "Authorization: Bearer sk-ws-H.EDHLYXP.qOYo.MEQCIFQ_mvHFsqLDpLogr4m-Nd7Jrv2LwBvzcO-imtm8AiBx79ohUMPmphWQA_fzhELjcUPSJLRuvjUAaeUGSMyXPQ" ^
-  -d {"provider":"openai","api_base":"http://192.168.19.238:8000/v1"}
+  -H "Authorization: Bearer %AGENT_WEB_TOKEN%" ^
+  -d "{\"provider\":\"openai\",\"api_base\":\"%JELLY_QWEN_BASE_URL%\"}"
+if errorlevel 1 exit /b 1
 
-echo.
-echo ============================================
-echo    配置完成！
-echo    浏览器打开: http://localhost:8000
-echo    令牌: sk-ws-H.EDHLYXP.qOYo.MEQCIFQ_mvHFsqLDpLogr4m-Nd7Jrv2LwBvzcO-imtm8AiBx79ohUMPmphWQA_fzhELjcUPSJLRuvjUAaeUGSMyXPQ
-echo ============================================
-echo.
-pause
+echo Jelly is ready at http://127.0.0.1:8000
+echo The access token is read from AGENT_WEB_TOKEN and is never printed.

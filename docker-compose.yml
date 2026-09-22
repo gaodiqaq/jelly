@@ -5,9 +5,10 @@ services:
       - "8000:8000"
     environment:
       AGENT_WEB_TOKEN: ${AGENT_WEB_TOKEN:?请设置 AGENT_WEB_TOKEN 环境变量}
-      AGENT_MODEL: ${AGENT_MODEL:-dashscope/qwen-plus}
-      DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:?请设置 DASHSCOPE_API_KEY}
+      AGENT_MODEL: ${AGENT_MODEL:-openai/gpt-4o-mini}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_API_BASE: ${OPENAI_API_BASE:-}
     volumes:
       - ./workspace:/workspace
-      - ./sessions:/root/.agent_shell/sessions
+      - ./data:/home/jelly/.agent_shell
     restart: unless-stopped

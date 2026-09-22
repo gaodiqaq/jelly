@@ -582,7 +582,7 @@ def serve_web(
     host: Annotated[str, typer.Option("--host", "-h", help="监听地址")] = "127.0.0.1",
     port: Annotated[int, typer.Option("--port", "-p", help="监听端口")] = 8000,
 ) -> None:
-    """启动 Web 服务（多用户浏览器界面，可选 AGENT_WEB_TOKEN / AGENT_WEB_USERS 认证）。"""
+    """启动 Web 工作室；非本机监听必须配置访问认证。"""
     _load_dotenv_files()
     try:
         settings = load_settings()
@@ -590,14 +590,25 @@ def serve_web(
         _print_fatal(f"配置错误: {exc}")
         raise typer.Exit(code=1) from exc
     console = create_console()
-    if not os.environ.get("AGENT_WEB_TOKEN") and not os.environ.get("AGENT_WEB_USERS"):
+    authenticated = bool(os.environ.get("AGENT_WEB_TOKEN") or os.environ.get("AGENT_WEB_USERS"))
+    loopback_hosts = {"127.0.0.1", "localhost", "::1"}
+    if host.lower() not in loopback_hosts and not authenticated:
+        _print_fatal(
+            "拒绝在非本机地址启动无认证 Agent。请设置 AGENT_WEB_TOKEN，"
+            "或改用 --host 127.0.0.1。"
+        )
+        raise typer.Exit(code=1)
+    if not authenticated:
         console.print(
-            "[yellow]警告: 未设置 AGENT_WEB_TOKEN/AGENT_WEB_USERS，"
-            "以无认证模式启动（仅限互信网络）[/yellow]"
+            "[yellow]提示: 当前仅监听本机，未启用访问口令。[/yellow]"
         )
     from agent_shell.server.app import create_app
 
-    application = create_app(settings)
+    try:
+        application = create_app(settings)
+    except ConfigError as exc:
+        _print_fatal(f"配置错误: {exc}")
+        raise typer.Exit(code=1) from exc
     console.print(
         f"[bold green]Web 服务已启动:[/bold green] http://{host}:{port}  "
         f"[dim](模型: {settings.model}, 工作目录: {settings.cwd})[/dim]"

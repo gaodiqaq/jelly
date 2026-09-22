@@ -80,3 +80,19 @@ def test_large_file_refused_without_overwrite(tmp_path):
         )
     ).is_error
     assert (tmp_path / "large").stat().st_size == 2_000_001
+
+
+def test_large_new_file_reports_snapshot_warning_without_retryable_failure(tmp_path):
+    runner, journal = executor(tmp_path)
+    content = "x" * 2_000_001
+
+    result = runner.execute(
+        ToolCall(id="a", name="write", arguments={"path": "large-new", "content": content})
+    )
+
+    assert not result.is_error
+    assert "文件已处理" in result.content
+    assert (tmp_path / "large-new").stat().st_size == len(content)
+    change = journal.list()[0]
+    assert change["state"] == "snapshot_failed"
+    assert change["diff"] == ""

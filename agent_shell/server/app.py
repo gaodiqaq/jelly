@@ -16,19 +16,24 @@
 - ``WS   /ws/{id}``               对话（流式事件；支持 ``{"type":"stop"}`` 停止、
                                   ``{"type":"approval_decision"}`` 权限决策）
 
-多用户: 环境变量 ``AGENT_WEB_USERS="alice:token1,bob:token2"`` 定义用户与口令，
-每个用户拥有独立的会话与待办目录（``~/.agent_shell/users/<user>/sessions``），
-聊天记录互不可见。仅设置 ``AGENT_WEB_TOKEN`` 时退化为单用户（无隔离，目录不变）。
-未设置任何口令时不鉴权（仅限互信网络）。
+Jelly 以单个可信操作者为正式安全边界。``AGENT_WEB_USERS`` 可为可信团队
+分开会话目录，但 Provider、Skill、进程权限与宿主文件系统仍然共享。
+``agent web`` 只允许在回环地址无口令启动；非回环监听必须配置认证。
 """
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import mimetypes
 import os
+import re
+import secrets
 import threading
 import time
+from contextlib import suppress
+from importlib import resources
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -43,21 +48,22 @@ from fastapi import (
     WebSocket,
     WebSocketDisconnect,
 )
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from agent_shell import __version__
 from agent_shell.config import Settings, load_settings
-from agent_shell.errors import SessionError
+from agent_shell.errors import ConfigError, SessionError
 from agent_shell.llm.client import LLMClient, is_private_base, proxy_bypass_client
 from agent_shell.runtime import ProviderStore
 from agent_shell.server.events import ClientMessage
 from agent_shell.server.manager import SessionManager
+from agent_shell.server.project_routes import project_router
 from agent_shell.server.recipes import RecipeInput, RecipeStore
 from agent_shell.server.runs import RunService
 
-_DIST_DIR = Path(__file__).resolve().parents[2] / "webui" / "dist"
+_SOURCE_DIST_DIR = Path(__file__).resolve().parents[2] / "webui" / "dist"
 
 _TOKEN_UNSET = object()
 
@@ -65,6 +71,8 @@ _USER_DIR_TMPL = Path.home() / ".agent_shell" / "users"
 
 # 工作台文件预览的最大字符数（超出截断）
 _MAX_PREVIEW_CHARS = 200_000
+_MAX_PREVIEW_BYTES = _MAX_PREVIEW_CHARS * 4
+_WEBSOCKET_DRAIN_TIMEOUT = 2.0
 
 
 def _workspace_path(root: Path, rel: str) -> Path:
@@ -103,6 +111,10 @@ class RenameRequest(BaseModel):
     """
 
     title: str = Field(min_length=1, max_length=64)
+
+
+class SessionCreate(BaseModel):
+    project_id: str | None = None
 
 
 class ConfigUpdate(BaseModel):
@@ -175,29 +187,50 @@ class PermissionUpdate(BaseModel):
 
 
 def _find_dist_dir() -> Path | None:
-    """定位前端构建产物目录（webui/dist）。
+    """定位可静态托管的前端构建产物。
+
+    发布包把 ``webui/dist`` 映射到 ``agent_shell/webui``，因此优先通过
+    ``importlib.resources`` 查找包内文件。源码开发时继续回退到仓库中的
+    ``webui/dist``，无需改变 Vite 的输出目录。
 
     Returns:
-        dist 目录；不存在返回 None（仅提供 API）。
+        包含 ``index.html`` 的静态目录；不存在返回 None（仅提供 API）。
     """
-    dist = _DIST_DIR
-    return dist if dist.is_dir() else None
+    candidates: list[Path] = []
+    try:
+        packaged = resources.files("agent_shell").joinpath("webui")
+        with suppress(TypeError):
+            candidates.append(Path(packaged))
+    except (ModuleNotFoundError, OSError):
+        pass
+    candidates.append(_SOURCE_DIST_DIR)
+    return next((path for path in candidates if (path / "index.html").is_file()), None)
 
 
-def _extract_token(authorization: str | None, token: str | None) -> str | None:
-    """从请求头/query 中提取访问令牌。
+def _extract_token(authorization: str | None) -> str | None:
+    """从 Authorization 请求头提取访问令牌。
 
     Args:
         authorization: Authorization 头。
-        token: query 参数。
-
     Returns:
         提取到的令牌；无则 None。
     """
     provided: str | None = None
     if authorization and authorization.lower().startswith("bearer "):
         provided = authorization[7:].strip()
-    return provided or token
+    return provided
+
+
+def _resolve_user(
+    users: dict[str, str | None], provided: str | None
+) -> tuple[bool, str | None]:
+    """Constant-time token lookup; the value ``None`` is a valid default user."""
+    if provided is None:
+        return False, None
+    for expected, user in users.items():
+        if secrets.compare_digest(provided, expected):
+            return True, user
+    return False, None
 
 
 def _parse_users() -> dict[str, str | None]:
@@ -216,9 +249,20 @@ def _parse_users() -> dict[str, str | None]:
         for entry in raw.split(","):
             entry = entry.strip()
             if not entry or ":" not in entry:
-                continue
+                raise ConfigError("AGENT_WEB_USERS 格式应为 用户名:口令,用户名:口令")
             user, token = entry.split(":", 1)
-            result[token.strip()] = user.strip()
+            user = user.strip()
+            token = token.strip()
+            if (
+                not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", user)
+                or user in {".", ".."}
+            ):
+                raise ConfigError(f"AGENT_WEB_USERS 包含无效用户名: {user!r}")
+            if not token:
+                raise ConfigError(f"AGENT_WEB_USERS 中 {user!r} 的口令不能为空")
+            if token in result:
+                raise ConfigError("AGENT_WEB_USERS 中的访问口令不能重复")
+            result[token] = user
         return result
     token = os.environ.get("AGENT_WEB_TOKEN", "").strip()
     return {token: None} if token else {}
@@ -269,15 +313,14 @@ def _make_auth_dependency(users: dict[str, str | None]) -> Any:
     def dependency(
         request: Request,
         authorization: Annotated[str | None, Header()] = None,
-        token: Annotated[str | None, Query()] = None,
     ) -> None:
-        provided = _extract_token(authorization, token)
         if not users:
             request.state.user = None
             return
-        if provided not in users:
+        matched, user = _resolve_user(users, _extract_token(authorization))
+        if not matched:
             raise HTTPException(status_code=401, detail="无效或缺失的访问令牌")
-        request.state.user = users[provided]
+        request.state.user = user
 
     return dependency
 
@@ -326,6 +369,33 @@ def create_app(
         version=__version__,
         description="类 Claude Code 的终端 Agent · Web 界面",
     )
+
+    @app.middleware("http")
+    async def browser_security_headers(request: Request, call_next: Any) -> Any:
+        """Keep sensitive API data out of caches and harden the local web surface."""
+        response = await call_next(request)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Referrer-Policy"] = "no-referrer"
+        response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+        response.headers["Cross-Origin-Opener-Policy"] = "same-origin"
+        response.headers["Cross-Origin-Resource-Policy"] = "same-origin"
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+            "img-src 'self' blob: data:; connect-src 'self' ws: wss:; object-src 'none'; "
+            "base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
+        )
+        if request.url.path.startswith("/api/"):
+            response.headers["Cache-Control"] = "no-store"
+            if request.url.path == "/api/file/raw":
+                response.headers["Content-Security-Policy"] = "default-src 'none'; sandbox"
+        elif request.url.path.startswith("/assets/"):
+            response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        elif response.headers.get("content-type", "").startswith("text/html"):
+            response.headers["Cache-Control"] = "no-cache"
+        return response
+
+    app.include_router(project_router(managers, auth))
 
     @app.get("/api/health")
     def health() -> dict[str, str]:
@@ -472,10 +542,15 @@ def create_app(
         return {"mode": mode}
 
     @app.get("/api/files", dependencies=[Depends(auth)])
-    def list_workspace_files(request: Request, path: str = Query(default=".")) -> dict[str, Any]:
+    def list_workspace_files(
+        request: Request,
+        path: str = Query(default="."),
+        session_id: str | None = None,
+        project_id: str | None = None,
+    ) -> dict[str, Any]:
         """列出工作区内目录（工作台文件树数据源，只读）。"""
-        root = settings.cwd.resolve()
-        target = _workspace_path(settings.cwd, path)
+        root = managers.for_user(request.state.user).workspace(session_id, project_id)
+        target = _workspace_path(root, path)
         if not target.is_dir():
             raise HTTPException(status_code=404, detail=f"目录不存在: {path}")
         try:
@@ -500,19 +575,23 @@ def create_app(
         return {"cwd": root.name, "path": rel, "entries": entries}
 
     @app.get("/api/file", dependencies=[Depends(auth)])
-    def read_workspace_file(request: Request, path: str) -> dict[str, Any]:
+    def read_workspace_file(
+        request: Request, path: str, session_id: str | None = None, project_id: str | None = None
+    ) -> dict[str, Any]:
         """读取工作区内文本文件内容（工作台预览数据源，只读）。"""
-        root = settings.cwd.resolve()
-        target = _workspace_path(settings.cwd, path)
+        root = managers.for_user(request.state.user).workspace(session_id, project_id)
+        target = _workspace_path(root, path)
         if not target.is_file():
             raise HTTPException(status_code=404, detail=f"文件不存在: {path}")
         try:
-            data = target.read_bytes()
+            with target.open("rb") as stream:
+                data = stream.read(_MAX_PREVIEW_BYTES + 1)
         except OSError as exc:
             raise HTTPException(status_code=400, detail=f"无法读取文件: {exc}") from exc
         is_binary = b"\x00" in data[:4096]
         content: str | None = None
-        truncated = False
+        truncated = len(data) > _MAX_PREVIEW_BYTES
+        data = data[:_MAX_PREVIEW_BYTES]
         if not is_binary:
             content = data.decode("utf-8", errors="replace")
             if len(content) > _MAX_PREVIEW_CHARS:
@@ -528,9 +607,12 @@ def create_app(
         }
 
     @app.get("/api/file/raw", dependencies=[Depends(auth)])
-    def read_workspace_file_raw(request: Request, path: str) -> FileResponse:
+    def read_workspace_file_raw(
+        request: Request, path: str, session_id: str | None = None, project_id: str | None = None
+    ) -> FileResponse:
         """返回工作区内文件的原始字节（图片预览 / 下载）。"""
-        target = _workspace_path(settings.cwd, path)
+        root = managers.for_user(request.state.user).workspace(session_id, project_id)
+        target = _workspace_path(root, path)
         if not target.is_file():
             raise HTTPException(status_code=404, detail=f"文件不存在: {path}")
         media_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
@@ -566,8 +648,21 @@ def create_app(
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.get("/api/sessions/{session_id}/run", dependencies=[Depends(auth)])
-    async def run_snapshot(request: Request, session_id: str):
-        return runs(request).snapshot(session_id)
+    async def run_snapshot(
+        request: Request,
+        session_id: str,
+        if_none_match: Annotated[str | None, Header()] = None,
+    ) -> Response:
+        state = runs(request).snapshot(session_id)
+        payload = json.dumps(state, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        etag = f'"{hashlib.sha256(payload).hexdigest()[:24]}"'
+        if if_none_match == etag:
+            return Response(status_code=304, headers={"ETag": etag})
+        return Response(
+            content=payload,
+            media_type="application/json",
+            headers={"ETag": etag},
+        )
 
     @app.post("/api/sessions/{session_id}/run", dependencies=[Depends(auth)])
     async def start_run(request: Request, session_id: str, body: ClientMessage):
@@ -609,10 +704,16 @@ def create_app(
         return {"sessions": managers.for_user(request.state.user).list_sessions()}
 
     @app.post("/api/sessions", dependencies=[Depends(auth)])
-    def create_session(request: Request) -> dict[str, str]:
+    def create_session(request: Request, body: SessionCreate | None = None) -> dict[str, Any]:
         """新建会话（使用当前运行时模型）。"""
-        session = managers.for_user(request.state.user).create_session()
-        return {"session_id": session.session_id}
+        session = managers.for_user(request.state.user).create_session(
+            body.project_id if body else None
+        )
+        return {
+            "session_id": session.session_id,
+            "project_id": session.project_id,
+            "cwd": str(session.cwd),
+        }
 
     @app.patch(
         "/api/sessions/{session_id}",
@@ -750,15 +851,29 @@ def create_app(
         """WebSocket 对话通道：接收用户消息/停止指令，流式返回事件。"""
         if users:
             token = websocket.query_params.get("token")
-            if token not in users:
+            matched, user = _resolve_user(users, token)
+            if not matched:
                 await websocket.close(code=1008, reason="无效或缺失的访问令牌")
                 return
-            user = users[token]
         else:
             user = None
         await websocket.accept()
         mgr = managers.for_user(user)
         agent_task: asyncio.Task | None = None
+        connected = True
+
+        async def send_json(payload: dict[str, Any]) -> None:
+            """Best-effort delivery that never aborts the worker after a disconnect."""
+            nonlocal connected
+            if not connected:
+                return
+            try:
+                await websocket.send_json(payload)
+            except (WebSocketDisconnect, RuntimeError):
+                connected = False
+
+        async def emit_event(event: Any) -> None:
+            await send_json(event.model_dump())
 
         async def handle_approval_decision(raw: dict) -> None:
             """回填权限决策；无匹配的待决请求时告知前端。"""
@@ -766,9 +881,7 @@ def create_app(
                 session_id, str(raw.get("id", "")), str(raw.get("decision", ""))
             )
             if not resolved:
-                await websocket.send_json(
-                    {"type": "error", "message": "当前没有等待审批的权限请求"}
-                )
+                await send_json({"type": "error", "message": "当前没有等待审批的权限请求"})
 
         try:
             while True:
@@ -776,7 +889,7 @@ def create_app(
                     # 等待用户消息
                     raw = await websocket.receive_json()
                     if raw.get("type") == "stop":
-                        await websocket.send_json({"type": "stopped", "message": "已停止"})
+                        await send_json({"type": "stopped", "message": "已停止"})
                         continue
                     if raw.get("type") == "approval_decision":
                         await handle_approval_decision(raw)
@@ -786,7 +899,7 @@ def create_app(
                         mgr.run_agent(
                             session_id,
                             message.content,
-                            lambda event: websocket.send_json(event.model_dump()),
+                            emit_event,
                         )
                     )
                 else:
@@ -797,7 +910,11 @@ def create_app(
                         return_when=asyncio.FIRST_COMPLETED,
                     )
                     if agent_task in done:
-                        # Agent自然完成
+                        # Agent 自然完成后结束同时等待的 receive，避免下一轮并发读取。
+                        receive_task.cancel()
+                        with suppress(asyncio.CancelledError):
+                            await receive_task
+                        await agent_task
                         agent_task = None
                     else:
                         # 收到消息（停止指令 / 权限决策 / 新消息）
@@ -808,26 +925,38 @@ def create_app(
                         if raw.get("type") == "stop":
                             # 请求取消并立即响应，让agent自然停止
                             mgr.request_cancel(session_id)
-                            await websocket.send_json({"type": "stopped", "message": "已停止"})
+                            await send_json({"type": "stopped", "message": "已停止"})
                         elif raw.get("type") == "approval_decision":
                             await handle_approval_decision(raw)
                         else:
                             # Agent运行中收到新消息：明确告知而非静默丢弃
-                            await websocket.send_json(
+                            await send_json(
                                 {
                                     "type": "error",
                                     "message": "当前会话正在运行中，请等待本轮完成后再发送",
                                 }
                             )
         except WebSocketDisconnect:
-            pass
+            connected = False
         except Exception as exc:  # noqa: BLE001 - 连接级兜底，记录后断开
-            await websocket.close(code=1011, reason=f"{type(exc).__name__}: {exc}")
+            connected = False
+            with suppress(RuntimeError):
+                await websocket.close(code=1011, reason=f"{type(exc).__name__}: {exc}")
         finally:
-            # 断开/退出时取消仍在运行的轮次，避免权限确认等阻塞点悬挂 worker 线程
+            # 断开只请求软停止。不能取消协程，否则后台线程尚未退出时会提前释放
+            # manager._running，导致同一会话并发执行。
+            connected = False
             mgr.request_cancel(session_id)
             if agent_task is not None:
-                agent_task.cancel()
+                try:
+                    await asyncio.wait_for(
+                        asyncio.shield(agent_task), timeout=_WEBSOCKET_DRAIN_TIMEOUT
+                    )
+                except TimeoutError:
+                    # 例如模型 SDK 仍在阻塞；任务保留并在真实 worker 退出后自行清理。
+                    agent_task.add_done_callback(
+                        lambda task: task.exception() if not task.cancelled() else None
+                    )
 
     @app.exception_handler(SessionError)
     async def session_error_handler(_request: Any, exc: SessionError) -> JSONResponse:

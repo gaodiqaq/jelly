@@ -12,16 +12,28 @@ export default function useTaskRun(sessionId, token, onSnapshot, onError) {
     let alive = true
     let timer
     let previous = ''
+    let etag = ''
+    let lastBusy = false
     async function poll() {
       try {
-        const state = await api(`/api/sessions/${sessionId}/run`)
+        const result = await api(`/api/sessions/${sessionId}/run`, {
+          withMeta: true,
+          headers: etag ? { 'If-None-Match': etag } : {},
+        })
         if (!alive) return
+        if (!result.data) {
+          timer = setTimeout(poll, lastBusy ? 650 : 4000)
+          return
+        }
+        const state = result.data
+        lastBusy = state.busy
+        etag = result.response.headers.get('etag') || ''
         const signature = JSON.stringify(state)
         if (signature !== previous) {
           previous = signature
           latest.current.onSnapshot(state)
         }
-        timer = setTimeout(poll, state.busy ? 650 : 2500)
+        timer = setTimeout(poll, state.busy ? 650 : 4000)
       } catch (error) {
         if (!alive) return
         previous = ''

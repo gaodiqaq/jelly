@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -26,6 +28,24 @@ class ScriptedLLM:
         if on_token is not None and reply.content:
             on_token(reply.content)
         return reply
+
+
+class BlockingLLM:
+    """Wait until released so disconnect cleanup can be observed deterministically."""
+
+    model = "blocking"
+
+    def __init__(self) -> None:
+        self.started = threading.Event()
+        self.release = threading.Event()
+
+    def complete(
+        self, messages, tools=None, *, stream=True, on_token=None, **_
+    ) -> AssistantMessage:
+        self.started.set()
+        if not self.release.wait(timeout=10):
+            raise TimeoutError("test did not release the blocking model")
+        return AssistantMessage(content="finished")
 
 
 @pytest.fixture()
@@ -79,6 +99,9 @@ def test_health(client: TestClient) -> None:
     response = client.get("/api/health")
     assert response.status_code == 200
     assert response.json()["model"] == "scripted-model"
+    assert response.headers["cache-control"] == "no-store"
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert "frame-ancestors 'none'" in response.headers["content-security-policy"]
 
 
 def test_auth_required_when_token_configured(settings: Settings) -> None:
@@ -89,7 +112,7 @@ def test_auth_required_when_token_configured(settings: Settings) -> None:
     ok = client.get("/api/sessions", headers={"Authorization": "Bearer secret"})
     assert ok.status_code == 200
     ok_query = client.get("/api/sessions", params={"token": "secret"})
-    assert ok_query.status_code == 200
+    assert ok_query.status_code == 401
 
 
 def test_create_and_list_session(client: TestClient) -> None:
@@ -118,6 +141,22 @@ def test_session_messages_404(client: TestClient) -> None:
     assert response.status_code == 404
 
 
+def test_run_snapshot_supports_conditional_polling(client: TestClient) -> None:
+    """未变化的运行快照返回 304，避免反复传输完整会话历史。"""
+    session_id = client.post("/api/sessions").json()["session_id"]
+    first = client.get(f"/api/sessions/{session_id}/run")
+    assert first.status_code == 200
+    etag = first.headers["etag"]
+
+    unchanged = client.get(
+        f"/api/sessions/{session_id}/run",
+        headers={"If-None-Match": etag},
+    )
+    assert unchanged.status_code == 304
+    assert unchanged.content == b""
+    assert unchanged.headers["etag"] == etag
+
+
 def test_websocket_plain_chat(client: TestClient) -> None:
     """WebSocket 流式聊天：收到 status/token/done。"""
     session_id = client.post("/api/sessions").json()["session_id"]
@@ -134,6 +173,29 @@ def test_websocket_plain_chat(client: TestClient) -> None:
     assert events[-1]["type"] == "done"
     tokens = [event["text"] for event in events if event["type"] == "token"]
     assert "我是测试回复" in "".join(tokens)
+
+
+def test_websocket_disconnect_keeps_session_locked_until_worker_exits(
+    settings: Settings,
+) -> None:
+    """断开连接只请求软停止，不能在后台线程退出前放开会话互斥。"""
+    llm = BlockingLLM()
+    store = ProviderStore(settings.session_dir / "runtime-config.yaml")
+    manager = SessionManager(settings, llm, store=store)
+    app = create_app(settings, manager, api_token=None, store=store)
+
+    with TestClient(app) as test_client:
+        session_id = test_client.post("/api/sessions").json()["session_id"]
+        with test_client.websocket_connect(f"/ws/{session_id}") as websocket:
+            websocket.send_json({"type": "user_message", "content": "等待"})
+            assert llm.started.wait(timeout=2)
+
+        assert session_id in manager._running
+        llm.release.set()
+        deadline = time.monotonic() + 3
+        while session_id in manager._running and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert session_id not in manager._running
 
 
 def test_websocket_tool_loop(tool_client: TestClient) -> None:

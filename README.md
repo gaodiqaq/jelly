@@ -1,29 +1,34 @@
 # 果冻
 
-**Jelly** — 本地优先的 AI Agent，支持 Web 界面与终端两种用法。
+**Jelly** — 面向个人与可信工作环境的本地优先 AI Agent，支持 Web 工作室与终端两种用法。
 
-Web 端已升级为 **Jelly Studio**：成果与版本、文件差异恢复、工作配方、明暗主题，以及刷新后可恢复查看的后台任务。详见 [工作室使用说明与能力边界](STUDIO.md)。
+Web 端 **Jelly Studio** 围绕「项目 → 任务 → 成果」组织工作。项目保存目录与执行设置，对话展示关键进展，文档和网页在旁边持续预览；文件版本与工作配方让成果可以继续打磨、复用。详见 [工作室使用说明](docs/STUDIO.md)。
 
 基于 `litellm` 网关，可对接任意主流大模型（OpenAI / Anthropic / DeepSeek / Gemini / 本地 Ollama / vLLM 等）。自带完整工具链（文件、Bash、搜索、网页抓取）、可插拔 Skill 技能系统、多会话持久化与权限控制。
 
 ## 快速开始（Web 端）
 
-启动 Web 服务后，在浏览器里打开工作室：
+需要 Python 3.10+、Node.js 20.19+（推荐 22.12+）和 npm。首次运行先安装后端并构建前端：
 
-```bash
-# 启动 Web 服务（默认监听 8000 端口）
-.\venv\Scripts\agent.exe web --host 0.0.0.0 --port 8000
+```powershell
+uv venv .venv --python 3.10
+uv pip install -e ".[dev]"
+cd webui
+npm ci
+npm run build
+cd ..
+.\.venv\Scripts\agent.exe web --host 127.0.0.1 --port 8000
 ```
 
-打开浏览器访问 **http://localhost:8000** 即可开始使用。默认无需登录。
+打开 **http://127.0.0.1:8000** 即可开始使用。只监听本机时可以不设口令；监听局域网地址时，服务会要求配置 `AGENT_WEB_TOKEN`，浏览器随后显示访问口令页面。
 
 ### 启动 / 停止脚本
 
 仓库提供一键脚本（Windows）：
 
 ```bash
-start_jelly.bat      # 双击或命令行运行：启动 Web 服务
-stop_jelly.bat       # 停止所有监听 8000 端口的 jelly 进程
+start_jelly.bat      # 双击或命令行运行：仅在本机启动 Web 服务
+stop_jelly.bat       # 仅停止监听 8000 端口的 Jelly Web 进程
 ```
 
 > 注意：启动前先确认没有已运行的实例（`netstat -ano | findstr ":8000.*LISTENING"`），避免端口冲突。
@@ -33,12 +38,16 @@ stop_jelly.bat       # 停止所有监听 8000 端口的 jelly 进程
 Jelly Studio 把 Agent 从“聊天窗口”变成可持续打磨成果的工作空间：
 
 - **成果与版本**：记录 `write/edit` 的修改前后内容，查看文本 Diff，并在文件未被后续改动时恢复。
+- **项目独立工作区**：每个项目绑定固定目录、任务历史、默认模型和权限。切换项目后，文件预览和版本恢复仍指向各自目录。
+- **对话与交付并排**：紧凑的项目导航、对话 / 执行记录 / 文件标签、可展开的工具步骤，以及始终可用的右侧成果面板。
 - **任务可恢复**：运行状态独立保存，刷新或切换页面后仍可查看进行中的任务；停止会等待执行器确认。
 - **工作配方**：把一次满意的工作方法整理成可编辑、可复用的配方，并保留版本号。
-- **作品预览**：右侧工作区支持文件树、Markdown、代码、图片和隔离的 HTML 预览。
-- **双主题**：暖白工作模式与乌梅深色模式，主题选择保存在当前浏览器。
+- **作品预览**：`write/edit` 的成果自动展示为卡片并打开预览；支持多文件标签、Markdown 目录、源文件、下载、专注阅读及隔离的 HTML 预览。
+- **双主题**：炭灰与鼠尾草绿的默认深色、柔和浅色；桌面三栏布局与手机预览抽屉。
 
-文件恢复只覆盖工作区内可建立快照的 `write/edit` 操作；Bash、网络请求和外部服务等副作用不会被假定为可撤回。完整边界见 [`STUDIO.md`](STUDIO.md)。
+第一次使用：点击侧栏「项目」旁的 `＋` → 绑定一个已存在的本地目录 → 在项目中新建任务 → 查看对话与自动打开的成果。模型连接在左下角「设置与连接」中配置。
+
+文件恢复只覆盖工作区内可建立快照的 `write/edit` 操作；Bash、网络请求和外部服务等副作用不会被假定为可撤回。完整边界见 [使用说明](docs/STUDIO.md#数据与边界)。
 
 ### 其他 Web 功能
 
@@ -47,10 +56,21 @@ Jelly Studio 把 Agent 从“聊天窗口”变成可持续打磨成果的工作
 - **点击即预览**：消息中的文件路径自动识别为链接，点击即在面板中打开对应文件
 - **Skill 快捷入口**：输入框左下角 ⚡ 按钮弹出技能列表，点击即激活
 - **权限模式选择器**：随时切换 只读 / 手动审批 / 自动授权；手动审批时工具执行前弹出确认卡片
-- **工作区切换**：设置面板可修改工作目录（`cwd`），切换后立即对下一轮对话生效并持久化
+- **工作区设置**：项目目录创建后固定；全局 `cwd` 设置用于未归属项目的旧会话，不会改变项目目录
 - **运行时热切换**：设置面板可切换模型、配置各提供商 Key / Base URL、测试连通性，无需重启
 - **流式输出**：模型回复实时渲染，token 用量与缓存命中率实时展示
-- **多用户隔离**：设置 `AGENT_WEB_USERS` 后各用户拥有独立会话，登录可见
+
+## 技术栈
+
+| 层次 | 技术 |
+| --- | --- |
+| Agent 与模型 | Python 3.10+、LiteLLM、类型化工具调用、可插拔 Skill |
+| Web 后端 | FastAPI、Uvicorn、Pydantic、HTTP/REST 与兼容 WebSocket 通道 |
+| CLI | Typer、Rich |
+| Web 前端 | React 18、Vite 8、原生 Fetch API |
+| 内容渲染 | Marked、DOMPurify、隔离的 HTML iframe |
+| 本地数据 | JSON / JSONL / YAML 与工作区文件；当前不依赖数据库 |
+| 质量与交付 | pytest、Ruff、Hatchling、Docker Compose、GitHub Actions |
 
 ## Skill 技能系统
 
@@ -130,9 +150,13 @@ agent run --session 20260731-143000-a1b2          # 恢复会话继续对话
 
 ## Docker 部署
 
-```bash
+先在仓库根目录创建 `.env` 并写入强随机口令，例如 `AGENT_WEB_TOKEN=...`，再运行：
+
+```powershell
 docker compose up -d --build
 ```
+
+容器以非 root 用户运行，将项目工作区持久化到 `./workspace`，Jelly 配置、会话和项目元数据持久化到 `./data`。Linux 主机需确保这两个目录可由容器内 UID `10001` 读写。不要把服务直接暴露到公网；远程使用时应放在带 TLS 的受控反向代理或私有网络之后。更多边界与报告方式见 [安全说明](SECURITY.md)。
 
 ## 开发
 
@@ -142,7 +166,7 @@ uv pip install -e ".[dev]"
 .venv\Scripts\ruff.exe check .          # 静态检查
 ```
 
-前端本地开发：`cd webui && npm run build`（构建产物由服务端静态托管到 `/`）。
+前端：在 `webui` 中运行 `npm ci`、`npm run build`，构建产物由服务端静态托管到 `/`。离线预览、浏览器验收和代码分工见 [开发与验证](docs/DEVELOPMENT.md)。
 
 ## 目录结构
 
@@ -158,11 +182,13 @@ agent_shell/
 ├── skills/         # Skill 系统：基类、注册表、安装器（标准 SKILL.md）、内置 Skill
 │   └── builtins/   # 内置 Skill
 ├── core/           # Agent 状态机、会话、权限执行器、文件变更记录
-├── server/         # FastAPI：REST + WebSocket、任务运行、配方、会话与工作区 API
+├── server/         # FastAPI：任务运行、项目存储与路由、成果、配方、会话 API
 ├── ui/             # rich 渲染、REPL 输入、权限询问
 └── main.py         # typer CLI 入口
 webui/              # React + Vite 前端（Jelly Studio，dist/ 由服务端托管）
-STUDIO.md           # 工作室能力、数据结构与边界说明
+docs/               # 工作室使用说明、开发与验证流程
+scripts/            # 可复现的离线预览与浏览器验收
+tests/              # 后端单元与接口测试（含项目隔离）
 Dockerfile          # 多阶段构建
 docker-compose.yml  # 一键部署（端口 8000）
 start_jelly.bat     # 启动 Web 服务脚本

@@ -7,6 +7,7 @@ import difflib
 import json
 import threading
 import uuid
+from contextlib import suppress
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -67,7 +68,15 @@ class ChangeJournal:
                     record["state"] = "unchanged"
                 self._save(record)
             except (OSError, ValueError) as exc:
-                return ToolResult(content=f"{result.content}\n版本记录未完成：{exc}", is_error=True)
+                # The file tool has already run at this point. Preserve its real outcome
+                # instead of reporting a false failure that may cause the model to retry.
+                record.update(state="snapshot_failed", error=str(exc))
+                with suppress(OSError):
+                    self._save(record)
+                return ToolResult(
+                    content=f"{result.content}\n注意：文件已处理，但版本快照未保存：{exc}",
+                    is_error=result.is_error,
+                )
             return result
 
     @staticmethod
@@ -84,14 +93,25 @@ class ChangeJournal:
         temporary.write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
         temporary.replace(target)
 
-    def list(self):
+    def list(self, include_diff=True):
         with _LOCK:
             records = []
             for file in self.directory.glob("*.json"):
                 record = json.loads(file.read_text(encoding="utf-8"))
-                if record["state"] == "unchanged":
+                if record["state"] == "unchanged" or Path(record["root"]).resolve() != self.root:
                     continue
                 public = {k: v for k, v in record.items() if k not in {"before", "after", "root"}}
+                if not include_diff:
+                    records.append(public)
+                    continue
+                public["kind"] = "created" if record["before"] is None else "modified"
+                if record["after"] is None and record["state"] in {
+                    "pending",
+                    "snapshot_failed",
+                }:
+                    public["diff"] = ""
+                    records.append(public)
+                    continue
                 before = (self._decode(record["before"]) or b"").decode("utf-8", errors="replace")
                 after = (self._decode(record["after"]) or b"").decode("utf-8", errors="replace")
                 public["diff"] = "".join(
@@ -102,7 +122,6 @@ class ChangeJournal:
                         tofile="修改后/" + record["path"],
                     )
                 )[:100_000]
-                public["kind"] = "created" if record["before"] is None else "modified"
                 records.append(public)
             return sorted(records, key=lambda r: r["created_at"], reverse=True)
 

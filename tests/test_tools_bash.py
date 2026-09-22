@@ -64,6 +64,26 @@ def test_bash_timeout(ctx: ToolContext) -> None:
     assert "超时" in result.content
 
 
+def test_bash_does_not_inherit_service_secrets(
+    ctx: ToolContext, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """模型和访问凭据不能被 Agent 通过子进程环境读取。"""
+    monkeypatch.setenv("JELLY_TEST_API_KEY", "must-not-leak")
+    monkeypatch.setenv("AGENT_WEB_USERS", "alice:must-not-leak-either")
+    probe = tmp_path / "probe_environment.py"
+    probe.write_text(
+        "import os\n"
+        "print(os.getenv('JELLY_TEST_API_KEY', 'missing'))\n"
+        "print(os.getenv('AGENT_WEB_USERS', 'missing'))\n",
+        encoding="utf-8",
+    )
+    command = "python probe_environment.py"
+    result = run_bash(ctx, BashArgs(command=command))
+    assert not result.is_error
+    assert "must-not-leak" not in result.content
+    assert result.content.count("missing") == 2
+
+
 def test_todo_lifecycle() -> None:
     """todo 添加/完成/查询全流程。"""
     store = TodoStore()

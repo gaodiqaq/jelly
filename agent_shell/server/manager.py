@@ -41,6 +41,7 @@ from agent_shell.server.events import (
     ToolResultEvent,
     UsageEvent,
 )
+from agent_shell.server.projects import ProjectStore
 from agent_shell.tools import TodoStore, build_registry
 from agent_shell.types import PermissionDecision, ToolCall
 
@@ -78,6 +79,7 @@ class SessionManager:
             self._store.seed_from_settings(settings)
         self._llm = llm or LLMClient(settings, self._store)
         self._session_dir = session_dir or settings.session_dir
+        self.projects = ProjectStore(self._session_dir / "projects")
         self._running: set[str] = set()
         self._cancel: dict[str, threading.Event] = {}
         self._todo: dict[str, TodoStore] = {}
@@ -139,22 +141,27 @@ class SessionManager:
 
     # ---------- 会话生命周期 ----------
 
-    def create_session(self) -> Session:
+    def create_session(self, project_id: str | None = None) -> Session:
         """创建新会话。
 
         Returns:
             新会话实例（已含系统消息）。
         """
-        model = self._store.model
+        project = self.projects.get(project_id) if project_id else None
+        cwd = Path(project["cwd"]) if project else self._settings.cwd
+        if not cwd.is_dir():
+            raise SessionError("工作目录不存在，请检查项目目录")
+        model = (project["model"] if project else "") or self._store.model
         system_prompt = self._settings.system_prompt or build_system_prompt(
-            self._settings.cwd, model, self._skill_catalog()
+            cwd, model, self._skill_catalog()
         )
         session = Session.create(
             self._session_dir,
             model,
-            self._settings.cwd,
+            cwd,
             system_prompt=system_prompt,
         )
+        session.project_id = project_id
         session.save()
         self._sessions[session.session_id] = session
         self._todo[session.session_id] = TodoStore()
@@ -195,7 +202,23 @@ class SessionManager:
         Returns:
             会话元信息列表。
         """
-        return [meta.__dict__ for meta in Session.list_sessions(self._session_dir)]
+        return [
+            {**meta.__dict__, "running": meta.session_id in self._running}
+            for meta in Session.list_sessions(self._session_dir)
+        ]
+
+    def workspace(self, session_id: str | None = None, project_id: str | None = None) -> Path:
+        if session_id:
+            session = self.get_session(session_id)
+            if project_id and session.project_id != project_id:
+                raise SessionError("任务不属于当前项目")
+            return session.cwd.resolve()
+        if project_id:
+            return Path(self.projects.get(project_id)["cwd"]).resolve()
+        return self._settings.cwd.resolve()
+
+    def project_for(self, session: Session) -> dict | None:
+        return self.projects.get(session.project_id) if session.project_id else None
 
     def serialize_messages(self, session: Session) -> list[dict[str, Any]]:
         """将会话消息历史序列化为前端可渲染的 JSON。
@@ -264,6 +287,8 @@ class SessionManager:
         # 3. 重建已加载会话的系统提示词（含新 cwd）并同步 session.cwd
         system_prompt = build_system_prompt(target, self._store.model, self._skill_catalog())
         for session in self._sessions.values():
+            if session.project_id:
+                continue
             session.cwd = target
             if session.messages and session.messages[0].role == "system":
                 session.messages[0].content = system_prompt
@@ -335,13 +360,16 @@ class SessionManager:
     # ---------- 执行 ----------
 
     def changes(self, session_id: str) -> ChangeJournal:
-        self.get_session(session_id)
-        return ChangeJournal(self._session_dir / "changes" / session_id, self._settings.cwd)
+        return ChangeJournal(self._session_dir / "changes" / session_id, self.workspace(session_id))
 
     def restore_change(self, session_id: str, change_id: str):
-        if self._running:
+        session = self.get_session(session_id)
+        root = self.workspace(session_id)
+        if any(self.workspace(sid) == root for sid in self._running):
             raise ValueError("请等待运行结束后恢复文件")
-        if self._permission_mode in {"readonly", "deny"}:
+        project = self.project_for(session)
+        mode = project["permission"] if project else self._permission_mode
+        if mode in {"readonly", "deny"}:
             raise ValueError("当前权限模式不允许恢复文件")
         return self.changes(session_id).restore(change_id)
 
@@ -500,10 +528,14 @@ class SessionManager:
             on_usage=on_usage,
         )
 
+        try:
+            agent = self._build_agent(session, callbacks, cancel_event, ask=on_approval_request)
+        except Exception:
+            self._cancel.pop(session_id, None)
+            raise
+
         def worker() -> None:
             try:
-                ask = on_approval_request if self._permission_mode == "ask" else None
-                agent = self._build_agent(session, callbacks, cancel_event, ask=ask)
                 agent.run(user_input)
             except AgentInterrupted:
                 push(StatusEvent(message="已停止"))
@@ -553,8 +585,20 @@ class SessionManager:
         Returns:
             Agent 实例。
         """
+        project = self.project_for(session)
+        settings = deepcopy(self._settings)
+        settings.cwd = session.cwd
+        if not settings.cwd.is_dir():
+            raise SessionError("项目目录不存在，任务未执行")
+        model = (project["model"] if project else "") or self._store.model
+        mode = project["permission"] if project else self._permission_mode
+        session.model = model
+        if not self._settings.system_prompt:
+            session.messages[0].content = build_system_prompt(
+                settings.cwd, model, self._skill_catalog()
+            )
         registry = build_registry(
-            cwd=self._settings.cwd,
+            cwd=settings.cwd,
             bash_timeout=self._settings.tools.bash_timeout,
             max_output_chars=self._settings.tools.max_output_chars,
             disabled=self._settings.tools.disabled,
@@ -563,14 +607,14 @@ class SessionManager:
         executor = ToolExecutor(
             registry,
             ask,
-            default_permission=self._permission_mode,
+            default_permission=mode,
             auto_approve_read_only=self._settings.permissions.auto_approve_read_only,
             journal=self.changes(session.session_id),
         )
         return Agent(
-            deepcopy(self._settings),
+            settings,
             session,
-            self._llm.snapshot() if isinstance(self._llm, LLMClient) else self._llm,
+            self._llm.snapshot(model) if isinstance(self._llm, LLMClient) else self._llm,
             executor,
             callbacks,
             stream=True,

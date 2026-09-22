@@ -12,6 +12,30 @@ from agent_shell.tools.base import ToolContext, ToolRegistry
 from agent_shell.types import ToolResult, ToolSpec
 
 MAX_OUTPUT_MARK = "\n...[输出已截断]..."
+_SECRET_ENV_MARKERS = (
+    "API_KEY",
+    "ACCESS_KEY",
+    "AUTH",
+    "COOKIE",
+    "CREDENTIAL",
+    "DATABASE_URL",
+    "DSN",
+    "PASSWORD",
+    "PRIVATE_KEY",
+    "SECRET",
+    "SESSION",
+    "TOKEN",
+    "WEB_USERS",
+)
+
+
+def _safe_environment() -> dict[str, str]:
+    """Build a child environment without credentials owned by the Jelly service."""
+    return {
+        name: value
+        for name, value in os.environ.items()
+        if not any(marker in name.upper() for marker in _SECRET_ENV_MARKERS)
+    }
 
 
 class BashArgs(BaseModel):
@@ -79,7 +103,7 @@ def run_bash(ctx: ToolContext, args: BashArgs) -> ToolResult:
             encoding="utf-8",
             errors="replace",
             timeout=timeout,
-            env=os.environ.copy(),
+            env=_safe_environment(),
         )
     except subprocess.TimeoutExpired as exc:
         partial = exc.stdout or ""

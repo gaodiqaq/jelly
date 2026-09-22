@@ -41,7 +41,7 @@ export default function Changes({ sessionId, busy, onOpenFile, onRestored }) {
     {!changes.length && <div className="studio-empty"><span>◈</span><h3>{loading ? '读取版本…' : '等待第一份成果'}</h3><p>让果冻创建或修改一个文件，版本和差异将出现在这里。</p></div>}
     {changes.map(change => <article className="change-card" key={change.id}>
       <div className="change-heading"><button onClick={() => onOpenFile(change.path)}>{change.path}</button><span>{change.kind === 'created' ? '新建' : '修改'}</span></div>
-      <div className="studio-muted">{new Date(change.created_at).toLocaleString()} · {({ ready: '版本已保存', restored: '已恢复', pending: '快照待完成', failed: '执行失败' })[change.state]}</div>
+      <div className="studio-muted">{new Date(change.created_at).toLocaleString()} · {({ ready: '版本已保存', restored: '已恢复', pending: '快照待完成', failed: '执行失败', snapshot_failed: '文件已处理，版本未保存' })[change.state]}</div>
       <details><summary>查看修改差异</summary><pre className="change-diff">{change.diff || '没有可显示的文本差异'}</pre></details>
       {change.state === 'ready' && (confirm === change.id ? <div className="restore-confirm"><p>{change.kind === 'created' ? '恢复将删除本次新建的文件。' : '恢复到这次修改之前的内容。'}如果文件已有后续修改，将拒绝覆盖。</p><button disabled={busy || restoring} onClick={() => restore(change)}>{restoring ? '恢复中…' : '确认恢复'}</button><button disabled={restoring} onClick={() => setConfirm(null)}>保留现状</button></div> : <button className="restore-button" disabled={busy} onClick={() => setConfirm(change.id)}>恢复此修改</button>)}
     </article>)}

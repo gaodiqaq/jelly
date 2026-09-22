@@ -11,7 +11,6 @@ from agent_shell.config import PermissionsConfig, Settings
 from agent_shell.runtime import ProviderStore
 from agent_shell.server.app import create_app
 from agent_shell.server.manager import SessionManager
-from agent_shell.types import AssistantMessage
 
 
 @pytest.fixture()
@@ -46,7 +45,9 @@ class ScriptedLLM:
 
     model = "scripted"
 
-    def complete(self, messages, tools=None, *, stream=True, on_token=None, **_):  # pragma: no cover
+    def complete(
+        self, messages, tools=None, *, stream=True, on_token=None, **_
+    ):  # pragma: no cover
         raise AssertionError("文件 API 测试不应调用 LLM")
 
 
@@ -118,7 +119,9 @@ def test_path_traversal_rejected(client: TestClient, tmp_path: Path) -> None:
     """越出工作区的路径（../、工作区外绝对路径）一律 400。"""
     assert client.get("/api/file", params={"path": "../outside.txt"}).status_code == 400
     assert client.get("/api/files", params={"path": ".."}).status_code == 400
-    assert client.get("/api/file", params={"path": str(tmp_path / "outside.txt")}).status_code == 400
+    assert (
+        client.get("/api/file", params={"path": str(tmp_path / "outside.txt")}).status_code == 400
+    )
 
 
 def test_raw_file_served(client: TestClient, workspace: Path) -> None:
@@ -128,6 +131,8 @@ def test_raw_file_served(client: TestClient, workspace: Path) -> None:
     resp = client.get("/api/file/raw", params={"path": "pic.svg"})
     assert resp.status_code == 200
     assert "svg" in resp.headers["content-type"]
+    assert resp.headers["content-disposition"].startswith("attachment;")
+    assert resp.headers["content-security-policy"] == "default-src 'none'; sandbox"
     assert b"<svg" in resp.content
 
 

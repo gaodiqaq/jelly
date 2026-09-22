@@ -140,7 +140,7 @@ class ClientMessage(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     type: Literal["user_message"] = "user_message"
-    content: str = Field(min_length=1)
+    content: str = Field(min_length=1, max_length=100_000)
 
 
 class StopMessage(BaseModel):

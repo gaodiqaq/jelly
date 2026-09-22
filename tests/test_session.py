@@ -87,8 +87,8 @@ def test_list_sessions_empty_dir(tmp_path: Path) -> None:
     assert Session.list_sessions(tmp_path / "missing") == []
 
 
-def test_snapshot_trims_from_oldest(session_dir: Path) -> None:
-    """snapshot 从最旧开始裁剪且保留系统消息。"""
+def test_snapshot_keeps_latest_context(session_dir: Path) -> None:
+    """snapshot 丢弃最旧内容，保留系统消息和最近对话。"""
     session = _build_session(session_dir)
     for i in range(5):
         session.add_message(UserMessage(content=f"消息{i} " + "x" * 100))
@@ -96,7 +96,8 @@ def test_snapshot_trims_from_oldest(session_dir: Path) -> None:
     snapshot = session.snapshot(budget)
     assert snapshot[0].role == "system"
     assert len(snapshot) == 4
-    assert snapshot[1].content.startswith("消息0")
+    assert snapshot[1].content.startswith("消息2")
+    assert snapshot[-1].content.startswith("消息4")
 
 
 def test_snapshot_keeps_all_within_budget(session_dir: Path) -> None:
@@ -119,9 +120,10 @@ def test_snapshot_keeps_tool_pairing_atomic(session_dir: Path) -> None:
     )
     session.add_message(ToolMessage(tool_call_id="c1", name="bash", content="hi"))
     session.add_message(UserMessage(content="第二个问题，请继续" + "y" * 60))
-    # 预算只够 system + 前三条消息，装不下最后一条 user
+    # 预算无法同时容纳全部内容，但最后一条 user 必须保留。
     budget = sum(len(m.model_dump_json()) for m in session.messages[:3]) + 10
     snapshot = session.snapshot(budget)
+    assert snapshot[-1].content.startswith("第二个问题")
     for i, message in enumerate(snapshot):
         if message.role == "assistant" and message.tool_calls:
             ids = {c.id for c in message.tool_calls}

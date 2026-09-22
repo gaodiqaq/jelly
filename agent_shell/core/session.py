@@ -45,6 +45,7 @@ class SessionMeta:
     model: str = ""
     cwd: str = ""
     message_count: int = 0
+    project_id: str | None = None
 
 
 class Session:
@@ -71,6 +72,7 @@ class Session:
         self.session_dir = session_dir
         self.model = model
         self.cwd = cwd
+        self.project_id: str | None = None
         self.title = ""
         self.messages: list[Message] = []
         self.skill_addon: str = ""  # Skill 增强的系统提示词
@@ -111,10 +113,10 @@ class Session:
         self.skill_addon = ""
 
     def snapshot(self, max_chars: int) -> list[Message]:
-        """返回裁剪后的消息列表（含系统消息，从最旧开始删除）。
+        """返回裁剪后的消息列表（含系统消息，优先保留最新上下文）。
 
         系统消息永远保留在首位；当总字符数超过 ``max_chars`` 时，
-        从最旧的非系统消息开始逐条删除，直到低于预算。
+        从最旧的非系统消息开始删除，保证当前请求和最近上下文不会丢失。
 
         Args:
             max_chars: 总字符数预算。
@@ -127,10 +129,10 @@ class Session:
             if self.messages and self.messages[0].role == "system"
             else list(self.messages)
         )
-        return self._trim_from_oldest(rest, max_chars)
+        return self._trim_to_latest(rest, max_chars)
 
-    def _trim_from_oldest(self, rest: list[Message], budget: int) -> list[Message]:
-        """从最旧开始挑选消息直到总字符数不超过预算。
+    def _trim_to_latest(self, rest: list[Message], budget: int) -> list[Message]:
+        """从最新消息向前挑选，保持工具调用组完整。
 
         Args:
             rest: 待挑选的消息（已剔除系统消息）。
@@ -148,14 +150,18 @@ class Session:
         system_size = sum(len(m.model_dump_json()) for m in system)
         if system_size > budget:
             return system
-        selected: list[Message] = []
+        selected_groups: list[list[Message]] = []
         used = system_size
-        for group in self._group_messages(rest):
+        for group in reversed(self._group_messages(rest)):
             size = sum(len(m.model_dump_json()) for m in group)
             if used + size > budget:
+                # 当前用户输入必须发给模型；单条过长时交给提供商做最终限制。
+                if not selected_groups:
+                    selected_groups.append(group)
                 break
-            selected.extend(group)
+            selected_groups.append(group)
             used += size
+        selected = [message for group in reversed(selected_groups) for message in group]
         return system + selected
 
     @staticmethod
@@ -207,6 +213,7 @@ class Session:
                     "updated_at": datetime.now(timezone.utc).isoformat(),
                     "model": self.model,
                     "cwd": str(self.cwd),
+                    "project_id": self.project_id,
                     "skill_addon": self.skill_addon,
                 },
                 ensure_ascii=False,
@@ -243,10 +250,7 @@ class Session:
         Returns:
             新会话实例。
         """
-        session_id = f"{datetime.now().strftime(SESSION_ID_FORMAT)}-{secrets.token_hex(2)}"
-        existing = {meta.session_id for meta in cls.list_sessions(session_dir)}
-        if session_id in existing:
-            session_id = f"{session_id}-{len(existing)}"
+        session_id = f"{datetime.now().strftime(SESSION_ID_FORMAT)}-{secrets.token_hex(8)}"
         session = cls(session_id, session_dir, model, cwd)
         session.add_message(SystemMessage(content=system_prompt))
         return session
@@ -288,6 +292,8 @@ class Session:
             Path(meta.get("cwd", str(Path.cwd()))),
         )
         session.title = meta.get("title", "")
+        session.project_id = meta.get("project_id")
+        session.created_at = meta.get("created_at", session.created_at)
         session.skill_addon = meta.get("skill_addon", "")
         for raw in lines[1:]:
             try:
@@ -327,6 +333,7 @@ class Session:
                         model=meta.get("model", ""),
                         cwd=meta.get("cwd", ""),
                         message_count=message_count,
+                        project_id=meta.get("project_id"),
                     )
                 )
             except (OSError, json.JSONDecodeError):

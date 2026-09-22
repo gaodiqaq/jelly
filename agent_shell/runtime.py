@@ -165,18 +165,22 @@ class ProviderStore:
     def save(self) -> None:
         """将当前 model / cwd / providers 写回配置文件（POSIX 下 chmod 600）。"""
         with self._lock:
-            data: dict[str, Any] = {"model": self._model}
-            if self._cwd:
-                data["cwd"] = self._cwd
-            if self._providers:
-                data["providers"] = {
-                    name: {
-                        "api_key": info.api_key,
-                        "api_base": info.api_base,
-                        "default_model": info.default_model,
-                    }
-                    for name, info in sorted(self._providers.items())
+            self._save_locked()
+
+    def _save_locked(self) -> None:
+        """Persist the current in-memory state while ``_lock`` is held."""
+        data: dict[str, Any] = {"model": self._model}
+        if self._cwd:
+            data["cwd"] = self._cwd
+        if self._providers:
+            data["providers"] = {
+                name: {
+                    "api_key": info.api_key,
+                    "api_base": info.api_base,
+                    "default_model": info.default_model,
                 }
+                for name, info in sorted(self._providers.items())
+            }
         self._path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self._path.with_suffix(".tmp")
         with tmp.open("w", encoding="utf-8") as fh:
@@ -251,7 +255,7 @@ class ProviderStore:
             raise ValueError("模型名不能为空")
         with self._lock:
             self._model = model
-        self.save()
+            self._save_locked()
 
     @property
     def cwd(self) -> str | None:
@@ -268,7 +272,7 @@ class ProviderStore:
         cwd = (cwd or "").strip()
         with self._lock:
             self._cwd = cwd or None
-        self.save()
+            self._save_locked()
 
     def get_provider(self, name: str) -> ProviderInfo | None:
         """按名称获取提供商信息。
@@ -312,7 +316,7 @@ class ProviderStore:
             if default_model is not None:
                 info.default_model = default_model.strip() or None
             self._providers[name] = info
-        self.save()
+            self._save_locked()
 
     def list_providers(self) -> list[dict[str, Any]]:
         """列出全部提供商（key 已掩码）。
@@ -339,7 +343,7 @@ class ProviderStore:
         with self._lock:
             if name in self._providers:
                 del self._providers[name]
-                self.save()
+                self._save_locked()
                 return True
             return False
 

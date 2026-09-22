@@ -7,6 +7,8 @@ __pycache__/
 .ruff_cache/
 .env
 dist/
+!webui/dist/
+!webui/dist/**
 build/
 node_modules/
 *.log
@@ -16,8 +18,19 @@ Thumbs.db
 # local scratch & generated files
 scratch/
 chinese-novelist/
+productions/
+turtle-soup.html
+webui/product.html
 # AI 创作作品（用户本地成果，不上传 GitHub）
 works/
+work/
+workspace/
+data/
+sessions/
+productions/**/.hypit/
+.coverage
+htmlcov/
+.mypy_cache/
 .pytest_tmp*
 .pytest_work*
 .pytest_work2*
