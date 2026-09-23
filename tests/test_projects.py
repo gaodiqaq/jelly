@@ -12,6 +12,7 @@ from agent_shell.errors import SessionError
 from agent_shell.llm.client import LLMClient
 from agent_shell.runtime import ProviderStore
 from agent_shell.server import app as app_module
+from agent_shell.server import projects as projects_module
 from agent_shell.server.app import create_app
 from agent_shell.server.manager import SessionManager
 from agent_shell.server.projects import ProjectSettings, ProjectStore
@@ -42,6 +43,7 @@ class FileLLM:
 @pytest.fixture
 def studio(tmp_path, monkeypatch):
     monkeypatch.delenv("AGENT_WEB_USERS", raising=False)
+    monkeypatch.setenv("AGENT_PROJECTS_ROOT", str(tmp_path / "managed"))
     settings = Settings(
         cwd=tmp_path,
         session_dir=tmp_path / "sessions",
@@ -149,6 +151,62 @@ def test_project_settings_and_session_root_survive_reload(studio):
     manager.set_cwd(root)
     assert manager.get_session(sid).cwd == cwd.resolve()
     assert client.get("/api/projects").json()["projects"][0]["task_count"] == 1
+
+
+def test_managed_project_creates_a_dedicated_directory(studio):
+    client, manager, root = studio
+    destination = root / "managed"
+    assert client.get("/api/projects/managed-root").json()["root"] == str(destination)
+    response = client.post(
+        "/api/projects/managed",
+        json={"name": "品牌/方案", "model": "test", "permission": "auto"},
+    )
+    assert response.status_code == 200, response.text
+    project = response.json()
+    workspace = destination / "品牌-方案"
+    assert project["cwd"] == str(workspace)
+    assert workspace.is_dir()
+    assert manager.projects.get(project["id"])["cwd"] == str(workspace)
+    assert client.post("/api/sessions", json={"project_id": project["id"]}).status_code == 200
+    duplicate = client.post("/api/projects/managed", json={"name": "品牌/方案"})
+    assert duplicate.status_code == 409
+    assert len(client.get("/api/projects").json()["projects"]) == 1
+
+
+def test_failed_managed_project_record_rolls_back_empty_directory(studio, monkeypatch):
+    client, manager, root = studio
+
+    def fail(_):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(manager.projects, "_write", fail)
+    response = client.post("/api/projects/managed", json={"name": "unfinished"})
+    assert response.status_code == 400
+    assert not (root / "managed" / "unfinished").exists()
+
+
+def test_project_record_replacement_preserves_previous_record_on_failure(studio, monkeypatch):
+    _, manager, _ = studio
+    first = manager.projects.create_managed(
+        projects_module.ManagedProjectCreate(name="durable"),
+        manager._settings.cwd / "managed",
+    )
+    original = manager.projects._path(first["id"]).read_bytes()
+
+    def fail(*_):
+        raise OSError("replace failed")
+
+    monkeypatch.setattr(projects_module.os, "replace", fail)
+    with pytest.raises(OSError, match="replace failed"):
+        manager.projects.save(ProjectSettings(name="changed"), first["id"])
+    assert manager.projects._path(first["id"]).read_bytes() == original
+    assert list(manager.projects.directory.glob("*.tmp")) == []
+
+
+def test_managed_directory_name_handles_windows_reserved_names():
+    assert ProjectStore.directory_name("CON.txt") == "CON.txt-项目"
+    with pytest.raises(ValueError):
+        ProjectStore.directory_name(" .. ")
 
 
 def test_project_archive_is_reversible_and_preserves_existing_work(studio):
@@ -283,17 +341,32 @@ def test_missing_directory_cleans_up_run_state(studio):
 
 def test_project_catalogues_are_user_scoped(tmp_path, monkeypatch):
     monkeypatch.setenv("AGENT_WEB_USERS", "alice:a,bob:b")
+    monkeypatch.setenv("AGENT_PROJECTS_ROOT", str(tmp_path / "managed"))
     monkeypatch.setattr(app_module, "_USER_DIR_TMPL", tmp_path / "users")
     settings = Settings(cwd=tmp_path, session_dir=tmp_path / "sessions")
     store = ProviderStore(tmp_path / "runtime.yaml")
     with TestClient(create_app(settings, store=store)) as client:
+        managed_a = client.post(
+            "/api/projects/managed",
+            headers={"Authorization": "Bearer a"},
+            json={"name": "Shared name"},
+        ).json()
+        managed_b = client.post(
+            "/api/projects/managed",
+            headers={"Authorization": "Bearer b"},
+            json={"name": "Shared name"},
+        ).json()
+        assert managed_a["cwd"] != managed_b["cwd"]
+        assert (tmp_path / "managed" / "alice" / "Shared name").is_dir()
+        assert (tmp_path / "managed" / "bob" / "Shared name").is_dir()
         data = client.post(
             "/api/projects",
             headers={"Authorization": "Bearer a"},
             json={"name": "Alice", "cwd": str(tmp_path)},
         ).json()
         headers = {"Authorization": "Bearer b"}
-        assert client.get("/api/projects", headers=headers).json()["projects"] == []
+        bob_projects = client.get("/api/projects", headers=headers).json()["projects"]
+        assert [p["name"] for p in bob_projects] == ["Shared name"]
         assert (
             client.post(
                 "/api/sessions", headers=headers, json={"project_id": data["id"]}

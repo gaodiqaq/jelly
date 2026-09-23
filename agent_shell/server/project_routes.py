@@ -1,10 +1,22 @@
 """Project settings and artifact discovery, scoped to the authenticated manager."""
 
+import os
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 
-from agent_shell.server.projects import ProjectArchive, ProjectCreate, ProjectSettings
+from agent_shell.server.projects import (
+    ManagedProjectCreate,
+    ProjectArchive,
+    ProjectCreate,
+    ProjectSettings,
+)
+
+
+def managed_root(user: str | None) -> Path:
+    configured = os.environ.get("AGENT_PROJECTS_ROOT", "").strip()
+    root = Path(configured).expanduser() if configured else Path.home() / "Jelly Projects"
+    return (root / user if user else root).resolve()
 
 
 def project_router(managers, auth):
@@ -35,6 +47,20 @@ def project_router(managers, auth):
             return managers.for_user(request.state.user).projects.save(body)
         except (ValueError, OSError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @router.get("/projects/managed-root")
+    def get_managed_root(request: Request):
+        return {"root": str(managed_root(request.state.user))}
+
+    @router.post("/projects/managed")
+    def create_managed_project(request: Request, body: ManagedProjectCreate):
+        try:
+            mgr = managers.for_user(request.state.user)
+            return mgr.projects.create_managed(body, managed_root(request.state.user))
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except OSError as exc:
+            raise HTTPException(status_code=400, detail=f"无法创建工作目录: {exc}") from exc
 
     @router.put("/projects/{project_id}")
     def update_project(request: Request, project_id: str, body: ProjectSettings):

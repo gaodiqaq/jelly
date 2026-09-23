@@ -18,6 +18,7 @@ RUN useradd --create-home --uid 10001 jelly \
   && chown -R jelly:jelly /workspace /home/jelly
 EXPOSE 8000
 ENV AGENT_CWD=/workspace \
+    AGENT_PROJECTS_ROOT=/workspace/JellyProjects \
     HOME=/home/jelly \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1

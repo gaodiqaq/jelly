@@ -124,6 +124,7 @@ def main():
         (root / name).mkdir(exist_ok=True)
     os.environ.pop("AGENT_WEB_USERS", None)
     os.environ.pop("AGENT_WEB_TOKEN", None)
+    os.environ["AGENT_PROJECTS_ROOT"] = str(root / "managed")
     settings = Settings(
         cwd=root, session_dir=root / "sessions", permissions=PermissionsConfig(default="auto")
     )

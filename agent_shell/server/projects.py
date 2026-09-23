@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import json
+import os
+import re
+import tempfile
 import threading
 import uuid
+from contextlib import suppress
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
@@ -22,6 +26,10 @@ class ProjectSettings(BaseModel):
 
 class ProjectCreate(ProjectSettings):
     cwd: str = Field(min_length=1, max_length=4096)
+
+
+class ManagedProjectCreate(ProjectSettings):
+    """Create a project and its own directory under Jelly's managed root."""
 
 
 class ProjectArchive(BaseModel):
@@ -92,10 +100,56 @@ class ProjectStore:
     def _write(self, project: dict) -> dict:
         self.directory.mkdir(parents=True, exist_ok=True)
         path = self._path(project["id"])
-        temporary = path.with_suffix(".tmp")
-        temporary.write_text(json.dumps(project, ensure_ascii=False), encoding="utf-8")
-        temporary.replace(path)
+        temporary: Path | None = None
+        try:
+            fd, temp_path = tempfile.mkstemp(dir=self.directory, suffix=".tmp")
+            temporary = Path(temp_path)
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                stream.write(json.dumps(project, ensure_ascii=False))
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, path)
+            temporary = None
+        finally:
+            if temporary is not None:
+                with suppress(OSError):
+                    temporary.unlink(missing_ok=True)
         return project
+
+    @staticmethod
+    def directory_name(name: str) -> str:
+        """Keep display names human-readable while avoiding unsafe platform filenames."""
+        cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "-", name.strip())
+        cleaned = re.sub(r"\s+", " ", cleaned).strip(" .")[:64].rstrip(" .")
+        if not cleaned:
+            raise ValueError("请填写可用的项目名称")
+        if re.match(r"^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)", cleaned, re.I):
+            cleaned = f"{cleaned[:60]}-项目"
+        return cleaned
+
+    def create_managed(self, body: ManagedProjectCreate, root: Path) -> dict:
+        """Create one new workspace, rolling back an empty directory on record failure."""
+        with self._lock:
+            directory = root.expanduser().resolve()
+            directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+            target = directory / self.directory_name(body.name)
+            try:
+                target.mkdir(mode=0o700)
+            except FileExistsError as exc:
+                raise ValueError("同名工作目录已存在，请修改项目名称或绑定现有目录") from exc
+            try:
+                return self.save(
+                    ProjectCreate(
+                        name=body.name,
+                        cwd=str(target),
+                        model=body.model,
+                        permission=body.permission,
+                    )
+                )
+            except Exception:
+                with suppress(OSError):
+                    target.rmdir()
+                raise
 
     def save(self, body: ProjectSettings, project_id: str | None = None) -> dict:
         with self._lock:

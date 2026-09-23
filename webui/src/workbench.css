@@ -238,6 +238,14 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px
 .dialog-heading h2 { color: var(--text-hi); font-size: 22px; font-weight: 450; margin: 8px 0 0; }
 .dialog-intro { color: var(--text-mute); font-size: 12px; margin: 14px 0 24px; }
 .field-note { font-size: 10px; color: var(--text-mute); margin: -7px 0 18px; line-height: 1.8; }
+.directory-choice { display: flex; gap: 3px; padding: 3px; margin: 0 0 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); }
+.directory-choice button { flex: 1; padding: 9px 10px; border: 0; border-radius: 6px; background: transparent; color: var(--text-mute); cursor: pointer; font-size: 11px; }
+.directory-choice button[aria-pressed="true"] { background: var(--raise); color: var(--text-hi); box-shadow: 0 1px 5px #0002; }
+.directory-choice button:focus-visible { outline: 2px solid var(--peach); outline-offset: -2px; }
+.managed-location { display: grid; gap: 7px; padding: 14px 15px; margin: 0 0 18px; border: 1px solid var(--line-strong); border-radius: 8px; background: color-mix(in srgb, var(--sage) 8%, var(--bg)); }
+.managed-location span { color: var(--text-mute); font-size: 10px; }
+.managed-location strong { color: var(--text-hi); font-size: 11px; font-weight: 500; line-height: 1.5; overflow-wrap: anywhere; }
+.managed-location small { color: var(--text-mute); font-size: 10px; line-height: 1.6; }
 .project-lifecycle { display: flex; align-items: center; justify-content: space-between; gap: 18px; margin-top: 22px; padding: 16px 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
 .project-lifecycle strong { color: var(--text-hi); font-size: 11px; font-weight: 550; }
 .project-lifecycle p { margin: 3px 0 0; color: var(--text-mute); font-size: 10px; line-height: 1.6; }

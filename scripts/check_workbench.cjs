@@ -2,7 +2,6 @@
 const { chromium } = require(process.env.JELLY_PLAYWRIGHT || 'playwright');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
-const path = require('node:path');
 
 (async () => {
   const url = process.env.JELLY_PREVIEW_URL || 'http://127.0.0.1:8012';
@@ -55,12 +54,17 @@ const path = require('node:path');
   await page.getByRole('button', { name: '新建项目', exact: true }).click();
   const projectName = `品牌设计 ${Date.now()}`;
   await page.getByLabel('项目名称', { exact: true }).fill(projectName);
-  const designRoot = path.resolve(research.cwd, '../design', String(Date.now()));
-  fs.mkdirSync(designRoot, { recursive: true });
-  await page.getByLabel('工作目录', { exact: true }).fill(designRoot);
+  await page.getByRole('button', { name: '绑定现有目录', exact: true }).click();
+  await page.getByLabel('工作目录', { exact: true }).waitFor();
+  await page.getByRole('button', { name: '创建新目录', exact: true }).click();
+  await page.getByText('你的专属工作目录', { exact: true }).waitFor();
+  await page.screenshot({ path: 'scratch/screenshots/project-create.png' });
   await page.getByLabel('执行权限', { exact: true }).selectOption('auto');
   await page.getByRole('button', { name: '创建项目', exact: true }).click();
   await page.locator('.workspace-selector').filter({ hasText: projectName }).waitFor();
+  const createdProject = (await (await page.request.get(`${url}/api/projects`)).json()).projects.find(project => project.name === projectName);
+  assert.ok(createdProject);
+  assert.equal(fs.existsSync(createdProject.cwd), true);
   assert.equal(await page.locator('.document-sheet').count(), 0);
   await page.getByRole('button', { name: '新建任务' }).click();
   await page.locator('.composer textarea:not([disabled])').fill('整理品牌设计项目的交付方案');
