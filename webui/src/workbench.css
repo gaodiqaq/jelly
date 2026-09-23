@@ -292,6 +292,14 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px
 .error-banner { display: flex; align-items: center; gap: 12px; }
 .error-banner > span { flex: 1; }
 .error-banner > button { border: 0; background: transparent; color: inherit; cursor: pointer; font-size: 17px; line-height: 1; }
+.prompt-recovery { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; padding: 13px 15px; margin: 14px 0; border: 1px solid color-mix(in srgb, var(--peach) 42%, var(--line)); border-radius: 8px; background: color-mix(in srgb, var(--peach) 7%, var(--panel)); }
+.prompt-recovery > div { min-width: 0; }
+.prompt-recovery strong { color: var(--text-hi); font-size: 11px; font-weight: 600; }
+.prompt-recovery p { margin: 4px 0 8px; color: var(--text-mute); font-size: 10px; line-height: 1.55; }
+.prompt-recovery pre { max-height: 74px; overflow: auto; margin: 0; color: var(--text); white-space: pre-wrap; overflow-wrap: anywhere; font: 11px/1.6 var(--font-mono); }
+.prompt-recovery button { flex-shrink: 0; padding: 7px 10px; border: 1px solid var(--line-strong); border-radius: 5px; background: var(--raise); color: var(--text-hi); cursor: pointer; font-size: 10px; }
+.prompt-recovery button:disabled { opacity: .45; cursor: default; }
+@media (max-width: 720px) { .prompt-recovery { flex-direction: column; } }
 .onboarding-state { padding: 34px; }
 .onboarding-card { width: min(600px, 100%); padding: clamp(28px, 5vw, 52px); border: 1px solid var(--line); border-radius: 10px; background: var(--panel); box-shadow: 0 24px 80px #0000000d; text-align: left; }
 .onboarding-card h1 { margin: 10px 0 12px; color: var(--text-hi); font-family: Georgia, 'Songti SC', SimSun, serif; font-size: clamp(25px, 3vw, 37px); font-weight: 400; line-height: 1.35; }

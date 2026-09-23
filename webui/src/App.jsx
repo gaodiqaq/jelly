@@ -223,6 +223,7 @@ export default function App() {
   const [error, setError] = useState('')
   const [pending, setPending] = useState(null)
   const [draft, setDraft] = useState('')
+  const [recovery, setRecovery] = useState(null)
   const [model, setModel] = useState('')
   const [providers, setProviders] = useState([])
   const [allModels, setAllModels] = useState({})
@@ -253,6 +254,7 @@ export default function App() {
   const [navOpen, setNavOpen] = useState(false)
   const activeSession = sessions.find(s => s.session_id === current)
   const activeProject = projects.find(p => p.id === (activeSession?.project_id || projectId))
+  const recoverableInput = recovery?.sessionId === current ? recovery.content : ''
   const activeProjects = projects.filter(project => !project.archived_at)
   const archivedProjects = projects.filter(project => project.archived_at)
   const projectArchived = !!activeProject?.archived_at
@@ -621,6 +623,7 @@ export default function App() {
     setUsage(state.usage || null)
     if (state.skill) setActiveSkill(state.skill)
     if (state.error) setError(state.error)
+    setRecovery(state.retry_content && !state.busy ? { sessionId: current, content: state.retry_content } : null)
   }, setError)
 
   useEffect(() => {
@@ -913,7 +916,7 @@ export default function App() {
                 </div>
               </div>
             </div>
-          ) : history.length === 0 && !pending && conversationTab === 'chat' && (
+          ) : history.length === 0 && !pending && !recoverableInput && conversationTab === 'chat' && (
             <div className="empty-state">
               <div>
                 <span className="jelly-cube empty-cube" aria-hidden="true" />
@@ -935,6 +938,10 @@ export default function App() {
           )}
           <div className="thread">
             {conversationTab === 'chat' && <Conversation history={history} pending={pending} artifacts={artifacts} busy={busy} onOpenFile={openFile} activeFile={wsFile} />}
+            {conversationTab === 'chat' && recoverableInput && !busy && <div className="prompt-recovery" role="status">
+              <div><strong>输入尚未写入任务历史</strong><p>任务在启动前中断了。原文仍保存在运行记录中，可调整设置后继续。</p><pre>{recoverableInput}</pre></div>
+              <button type="button" disabled={projectArchived} onClick={() => { setDraft(previous => previous.includes(recoverableInput) ? previous : previous ? `${previous}\n\n${recoverableInput}` : recoverableInput); requestAnimationFrame(() => draftRef.current?.focus()) }}>放回输入框</button>
+            </div>}
             {conversationTab === 'execution' && <><div className="view-heading"><span className="eyebrow">ACTIVITY</span><h2>每一步，清晰可见。</h2><p>展开一条记录，查看实际输入和执行结果。</p></div>{allCalls.length ? <ExecutionList calls={allCalls} /> : <p className="pane-empty">还没有工具执行记录。</p>}</>}
             {conversationTab === 'files' && <><div className="view-heading"><span className="eyebrow">DELIVERABLES</span><h2>这次合作的成果</h2><p>选择一个文件，在旁边继续查看和打磨。</p></div><Artifacts artifacts={artifacts} onOpenFile={openFile} activeFile={wsFile} />{!artifacts.length && <p className="pane-empty">任务创建或修改的文件会出现在这里。</p>}{artifactState.error && <p role="alert" className="form-error">{artifactState.error}</p>}</>}
             {pendingApproval && <ApprovalCard approval={pendingApproval} onDecide={decideApproval} />}

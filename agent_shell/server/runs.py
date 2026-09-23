@@ -4,8 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import tempfile
 import uuid
+from contextlib import suppress
 from pathlib import Path
+
+from agent_shell.core.session import Session
+from agent_shell.errors import SessionError
 
 
 class RunService:
@@ -21,11 +27,30 @@ class RunService:
     def _save(self, session_id):
         path = self._path(session_id)
         path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = path.with_suffix(".tmp")
-        temporary.write_text(
-            json.dumps(self.states[session_id], ensure_ascii=False), encoding="utf-8"
-        )
-        temporary.replace(path)
+        temporary = None
+        try:
+            fd, temp_path = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
+            temporary = Path(temp_path)
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                stream.write(json.dumps(self.states[session_id], ensure_ascii=False))
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, path)
+            temporary = None
+        finally:
+            if temporary is not None:
+                with suppress(OSError):
+                    temporary.unlink(missing_ok=True)
+
+    def _input_persisted(self, session_id, state):
+        baseline = state.get("user_count_before")
+        if not isinstance(baseline, int):
+            return False
+        try:
+            session = Session.resume(self.manager._session_dir, session_id)
+        except (SessionError, OSError):
+            return False
+        return sum(message.role == "user" for message in session.messages) > baseline
 
     def snapshot(self, session_id):
         path = self._path(session_id)
@@ -49,11 +74,16 @@ class RunService:
                             approval=None,
                             pending=None,
                         )
+                    if state.get("retry_content") and self._input_persisted(session_id, state):
+                        state["retry_content"] = None
                 self.states[session_id] = state
             else:
                 self.states[session_id] = {"busy": False, "status": "", "pending": None}
         state = dict(self.states[session_id])
         if not state["busy"]:
+            if state.get("retry_content") and self._input_persisted(session_id, state):
+                state["retry_content"] = None
+                self.states[session_id]["retry_content"] = None
             state["history"] = self.manager.serialize_messages(self.manager.get_session(session_id))
         return state
 
@@ -71,6 +101,11 @@ class RunService:
             "approval": None,
             "error": "",
             "usage": None,
+            "retry_content": content,
+            "user_count_before": sum(
+                message.role == "user"
+                for message in self.manager.get_session(session_id).messages
+            ),
         }
         previous = self.states[session_id]
         self.states[session_id] = state
@@ -123,6 +158,10 @@ class RunService:
                 state["error"] = str(exc)
             finally:
                 state.update(busy=False, pending=None, approval=None)
+                if self._input_persisted(session_id, state) or (
+                    not state["error"] and not state.get("stopping")
+                ):
+                    state["retry_content"] = None
                 state["status"] = (
                     "已停止"
                     if state.get("stopping")

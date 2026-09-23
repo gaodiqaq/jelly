@@ -112,6 +112,15 @@ class PreviewLLM:
         return AssistantMessage(content=content)
 
 
+class PreviewManager(SessionManager):
+    """A deterministic preflight failure for the prompt-recovery browser check."""
+
+    def _build_agent(self, session, *args, **kwargs):
+        if session.title.startswith("模拟启动失败"):
+            raise RuntimeError("离线验收：模型尚未就绪")
+        return super()._build_agent(session, *args, **kwargs)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--port", type=int, default=8012)
@@ -130,7 +139,7 @@ def main():
     )
     store = ProviderStore(root / "runtime.yaml")
     store.set_model("preview/offline")
-    manager = SessionManager(settings, PreviewLLM(), store=store)
+    manager = PreviewManager(settings, PreviewLLM(), store=store)
     if not manager.projects.list():
         project = manager.projects.save(
             ProjectCreate(

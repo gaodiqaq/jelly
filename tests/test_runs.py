@@ -5,11 +5,13 @@ import threading
 import pytest
 
 from agent_shell.config import PermissionsConfig, Settings
-from agent_shell.errors import AgentInterrupted
+from agent_shell.core.session import Session
+from agent_shell.errors import AgentInterrupted, LLMError
 from agent_shell.runtime import ProviderStore
+from agent_shell.server import runs as runs_module
 from agent_shell.server.manager import SessionManager
 from agent_shell.server.runs import RunService
-from agent_shell.types import AssistantMessage, ToolCall
+from agent_shell.types import AssistantMessage, ToolCall, UserMessage
 
 
 class WaitingLLM:
@@ -25,6 +27,13 @@ class WaitingLLM:
             if cancel_event.is_set():
                 raise AgentInterrupted("stop")
         return AssistantMessage(content="finished")
+
+
+class FailingLLM:
+    model = "failing"
+
+    def complete(self, messages, tools=None, **kwargs):
+        raise LLMError("model unavailable")
 
 
 def service(tmp_path, llm):
@@ -55,6 +64,7 @@ def test_run_survives_client_absence_and_rejects_duplicate(tmp_path):
         assert not state["busy"]
         assert state["history"][-1]["content"] == "finished"
         assert len([m for m in state["history"] if m["role"] == "user"]) == 1
+        assert state["retry_content"] is None
 
     asyncio.run(scenario())
 
@@ -82,6 +92,83 @@ def test_restart_marks_run_interrupted(tmp_path):
     state = runs.snapshot(sid)
     assert not state["busy"] and state["approval"] is None
     assert "中断" in state["status"]
+
+
+def test_restart_keeps_unpersisted_prompt_available(tmp_path):
+    runs, sid = service(tmp_path, WaitingLLM())
+    path = runs._path(sid)
+    path.parent.mkdir(parents=True)
+    state = {
+        "busy": True,
+        "status": "准备开始…",
+        "retry_content": "请继续打磨产品方案",
+        "user_count_before": 0,
+    }
+    path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+    restarted = RunService(runs.manager).snapshot(sid)
+    assert restarted["busy"] is False
+    assert restarted["retry_content"] == state["retry_content"]
+    assert "中断" in restarted["status"]
+
+    session = runs.manager.get_session(sid)
+    session.add_message(UserMessage(content=state["retry_content"]))
+    session.save()
+    persisted = RunService(runs.manager).snapshot(sid)
+    assert persisted["retry_content"] is None
+
+
+def test_startup_failure_retains_prompt_without_duplicating_history(tmp_path, monkeypatch):
+    async def scenario():
+        runs, sid = service(tmp_path, WaitingLLM())
+
+        def fail(*_, **__):
+            raise RuntimeError("model setup failed")
+
+        monkeypatch.setattr(runs.manager, "_build_agent", fail)
+        runs.start(sid, "不要丢失的输入")
+        await runs.tasks[sid]
+        state = runs.snapshot(sid)
+        assert state["status"] == "执行失败"
+        assert state["retry_content"] == "不要丢失的输入"
+        assert state["history"] == []
+        assert Session.resume(runs.manager._session_dir, sid).message_count == 1
+        restarted = RunService(runs.manager).snapshot(sid)
+        assert restarted["retry_content"] == "不要丢失的输入"
+
+    asyncio.run(scenario())
+
+
+def test_model_failure_keeps_persisted_prompt_in_history_without_recovery(tmp_path):
+    async def scenario():
+        runs, sid = service(tmp_path, FailingLLM())
+        runs.start(sid, "模型调用前已提交的输入")
+        await runs.tasks[sid]
+        state = runs.snapshot(sid)
+        assert state["status"] == "执行失败"
+        assert state["retry_content"] is None
+        assert [item["content"] for item in state["history"] if item["role"] == "user"] == [
+            "模型调用前已提交的输入"
+        ]
+
+    asyncio.run(scenario())
+
+
+def test_run_state_replacement_preserves_previous_file_on_failure(tmp_path, monkeypatch):
+    runs, sid = service(tmp_path, WaitingLLM())
+    runs.snapshot(sid)
+    runs._save(sid)
+    path = runs._path(sid)
+    original = path.read_bytes()
+    runs.states[sid]["status"] = "after"
+
+    def fail(*_):
+        raise OSError("replace failed")
+
+    monkeypatch.setattr(runs_module.os, "replace", fail)
+    with pytest.raises(OSError, match="replace failed"):
+        runs._save(sid)
+    assert path.read_bytes() == original
+    assert list(path.parent.glob("*.tmp")) == []
 
 
 def test_corrupt_run_state_keeps_session_available(tmp_path):
