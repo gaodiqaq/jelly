@@ -7,7 +7,7 @@ COPY webui/ ./
 RUN npm run build
 
 # --- 后端运行 ---
-FROM python:3.12-slim AS runtime
+FROM python:3.14-slim AS runtime
 WORKDIR /app
 COPY pyproject.toml README.md ./
 COPY agent_shell/ ./agent_shell/
