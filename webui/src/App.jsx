@@ -971,7 +971,20 @@ export default function App() {
               <button type="button" disabled={projectArchived} onClick={() => { setDraft(previous => previous.includes(recoverableInput) ? previous : previous ? `${previous}\n\n${recoverableInput}` : recoverableInput); requestAnimationFrame(() => draftRef.current?.focus()) }}>放回输入框</button>
             </div>}
             {conversationTab === 'execution' && <><div className="view-heading"><span className="eyebrow">ACTIVITY</span><h2>每一步，清晰可见。</h2><p>展开一条记录，查看实际输入和执行结果。</p></div>{allCalls.length ? <ExecutionList calls={allCalls} /> : <p className="pane-empty">还没有工具执行记录。</p>}</>}
-            {conversationTab === 'files' && <><div className="deliverables-heading"><div className="view-heading"><span className="eyebrow">DELIVERABLES</span><h2>这次合作的成果</h2><p>选择文件阅读；交付包下载到本机，分享前请检查内容。</p></div><button type="button" className="delivery-export" disabled={busy || exportingTask} onClick={exportTask}>{exportingTask ? '正在打包…' : '↓ 导出交付包'}</button></div><Artifacts artifacts={artifacts} onOpenFile={openFile} activeFile={wsFile} />{!artifacts.length && <p className="pane-empty">任务创建或修改的文件会出现在这里；对话记录仍可导出。</p>}{artifactState.error && <p role="alert" className="form-error">{artifactState.error}</p>}</>}
+            {conversationTab === 'files' && <>
+              <div className="deliverables-heading">
+                <div className="view-heading">
+                  <span className="eyebrow">DELIVERABLES</span>
+                  <h2>这次合作的成果</h2>
+                  <p>选择文件阅读；交付包下载到本机，分享前请检查内容。</p>
+                </div>
+                <button type="button" className="delivery-export" disabled={busy || exportingTask} onClick={exportTask}>{exportingTask ? '正在打包…' : '↓ 导出交付包'}</button>
+              </div>
+              <Artifacts artifacts={artifacts} onOpenFile={openFile} activeFile={wsFile} />
+              {!artifacts.length && <p className="pane-empty">{artifactState.warnings.length ? '当前没有可显示的有效成果，请检查下方提示。' : '任务创建或修改的文件会出现在这里；对话记录仍可导出。'}</p>}
+              {artifactState.warnings.length > 0 && <p role="alert" className="form-error">{artifactState.warnings.length} 条版本记录需要核对，部分成果可能未显示；交付包清单会注明。</p>}
+              {artifactState.error && <p role="alert" className="form-error">{artifactState.error}</p>}
+            </>}
             {pendingApproval && <ApprovalCard approval={pendingApproval} onDecide={decideApproval} />}
             {status && (
               <div className="status" aria-hidden="true">

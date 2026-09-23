@@ -129,6 +129,28 @@ def test_delivery_never_archives_a_path_outside_the_workspace(tmp_path):
     with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
         assert all(not name.startswith("artifacts/") for name in archive.namelist())
         manifest = json.loads(archive.read("manifest.json"))
-        assert manifest["omitted"] == [
-            {"path": f"../{outside.name}", "reason": "路径不安全"}
+        assert manifest["omitted"] == []
+        assert manifest["warnings"] == [
+            {"file": f"{record['id']}.json", "message": "版本记录损坏，已隔离"}
         ]
+
+
+def test_corrupt_version_warns_without_hiding_other_artifacts(tmp_path):
+    client, manager, _ = _client(tmp_path)
+    session = manager.create_session()
+    _record_file(manager, session.session_id, "good.md", b"good")
+    directory = manager.changes(session.session_id).directory
+    corrupt = directory / ("b" * 32 + ".json")
+    corrupt.write_text("{broken", encoding="utf-8")
+
+    changes = client.get(f"/api/sessions/{session.session_id}/changes")
+    artifacts = client.get(f"/api/sessions/{session.session_id}/artifacts")
+    delivery = client.get(f"/api/sessions/{session.session_id}/delivery")
+    assert changes.status_code == artifacts.status_code == delivery.status_code == 200
+    assert len(changes.json()["changes"]) == 1
+    assert [item["path"] for item in artifacts.json()["artifacts"]] == ["good.md"]
+    warning = [{"file": corrupt.name, "message": "版本记录损坏，已隔离"}]
+    assert changes.json()["warnings"] == artifacts.json()["warnings"] == warning
+    with zipfile.ZipFile(io.BytesIO(delivery.content)) as archive:
+        assert archive.read("artifacts/good.md") == b"good"
+        assert json.loads(archive.read("manifest.json"))["warnings"] == warning

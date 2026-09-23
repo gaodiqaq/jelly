@@ -739,7 +739,9 @@ def create_app(
 
     @app.get("/api/sessions/{session_id}/changes", dependencies=[Depends(auth)])
     def list_changes(request: Request, session_id: str):
-        return {"changes": managers.for_user(request.state.user).changes(session_id).list()}
+        journal = managers.for_user(request.state.user).changes(session_id)
+        changes = journal.list()
+        return {"changes": changes, "warnings": journal.issues()}
 
     @app.post(
         "/api/sessions/{session_id}/changes/{change_id}/restore", dependencies=[Depends(auth)]

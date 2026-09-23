@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import difflib
 import json
+import os
+import stat
+import tempfile
 import threading
 import uuid
 from contextlib import suppress
@@ -15,12 +19,17 @@ from agent_shell.types import ToolCall, ToolResult
 
 _LOCK = threading.RLock()
 _LIMIT = 2_000_000
+_MAX_RECORD_BYTES = 6_000_000
+_STATES = {
+    "pending", "ready", "failed", "unchanged", "snapshot_failed", "restoring", "restored"
+}
 
 
 class ChangeJournal:
     def __init__(self, directory: Path, root: Path):
         self.directory = directory
         self.root = root.resolve()
+        self._issues: list[dict[str, str]] = []
 
     def _target(self, value: str) -> Path:
         path = Path(value).expanduser()
@@ -85,21 +94,95 @@ class ChangeJournal:
 
     @staticmethod
     def _decode(data):
-        return None if data is None else base64.b64decode(data)
+        return None if data is None else base64.b64decode(data, validate=True)
 
     def _save(self, record):
         target = self.directory / f"{record['id']}.json"
-        temporary = target.with_suffix(".tmp")
-        temporary.write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
-        temporary.replace(target)
+        self.directory.mkdir(parents=True, exist_ok=True)
+        temporary = None
+        try:
+            fd, temp_path = tempfile.mkstemp(dir=self.directory, suffix=".tmp")
+            temporary = Path(temp_path)
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                stream.write(json.dumps(record, ensure_ascii=False))
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, target)
+            temporary = None
+        finally:
+            if temporary is not None:
+                with suppress(OSError):
+                    temporary.unlink(missing_ok=True)
+
+    def _load(self, file: Path):
+        with file.open("rb") as stream:
+            raw = stream.read(_MAX_RECORD_BYTES + 1)
+        if len(raw) > _MAX_RECORD_BYTES:
+            raise ValueError("版本记录超过大小上限")
+        record = json.loads(raw.decode("utf-8"))
+        if (
+            not isinstance(record, dict)
+            or len(file.stem) != 32
+            or any(char not in "0123456789abcdef" for char in file.stem)
+            or record.get("id") != file.stem
+        ):
+            raise ValueError("版本 ID 与文件名不一致")
+        if record.get("state") not in _STATES or record.get("tool") not in {"write", "edit"}:
+            raise ValueError("版本状态或工具无效")
+        if not isinstance(record.get("path"), str) or not record["path"].strip():
+            raise ValueError("版本路径无效")
+        if not isinstance(record.get("root"), str) or Path(record["root"]).resolve() != self.root:
+            raise ValueError("版本不属于当前工作区")
+        if self._target(record["path"]) == self.root:
+            raise ValueError("版本路径无效")
+        if not isinstance(record.get("created_at"), str):
+            raise ValueError("版本时间无效")
+        datetime.fromisoformat(record["created_at"])
+        for key in ("before", "after"):
+            value = record.get(key)
+            if value is not None:
+                if not isinstance(value, str) or len(value) > (_LIMIT * 4 // 3) + 8:
+                    raise ValueError("版本快照无效")
+                self._decode(value)
+        return record
+
+    def issues(self) -> list[dict[str, str]]:
+        return [dict(issue) for issue in self._issues]
+
+    def _reconcile_restore(self, record):
+        """Resolve a restore interrupted between the file change and journal commit."""
+        try:
+            current = self._read(self._target(record["path"]))
+        except (OSError, ValueError):
+            return False
+        if current == self._decode(record["before"]):
+            next_state = "restored"
+        elif current == self._decode(record["after"]):
+            next_state = "ready"
+        else:
+            return False
+        record["state"] = next_state
+        try:
+            self._save(record)
+        except OSError:
+            record["state"] = "restoring"
+            return False
+        return True
 
     def list(self, include_diff=True):
         with _LOCK:
             records = []
+            issues = []
             for file in self.directory.glob("*.json"):
-                record = json.loads(file.read_text(encoding="utf-8"))
-                if record["state"] == "unchanged" or Path(record["root"]).resolve() != self.root:
+                try:
+                    record = self._load(file)
+                except (OSError, ValueError, TypeError, binascii.Error, UnicodeError):
+                    issues.append({"file": file.name, "message": "版本记录损坏，已隔离"})
                     continue
+                if record["state"] == "unchanged":
+                    continue
+                if record["state"] == "restoring" and not self._reconcile_restore(record):
+                    issues.append({"file": file.name, "message": "恢复状态待核对，请检查当前文件"})
                 public = {k: v for k, v in record.items() if k not in {"before", "after", "root"}}
                 if not include_diff:
                     records.append(public)
@@ -123,23 +206,58 @@ class ChangeJournal:
                     )
                 )[:100_000]
                 records.append(public)
+            self._issues = issues
             return sorted(records, key=lambda r: r["created_at"], reverse=True)
 
     def restore(self, change_id: str):
         if len(change_id) != 32 or any(c not in "0123456789abcdef" for c in change_id):
             raise ValueError("版本 ID 无效")
         with _LOCK:
-            record = json.loads((self.directory / f"{change_id}.json").read_text(encoding="utf-8"))
-            if record["state"] != "ready" or Path(record["root"]).resolve() != self.root:
+            try:
+                record = self._load(self.directory / f"{change_id}.json")
+            except (OSError, ValueError, TypeError, binascii.Error, UnicodeError) as exc:
+                raise ValueError("版本记录不存在或已损坏，无法恢复") from exc
+            if record["state"] != "ready":
                 raise ValueError("该版本不能在当前工作区恢复")
             path = self._target(record["path"])
             if self._read(path) != self._decode(record["after"]):
                 raise ValueError("文件已被后续修改；为保留这些修改，未执行恢复")
             before = self._decode(record["before"])
-            if before is None:
-                path.unlink(missing_ok=True)
-            else:
-                path.write_bytes(before)
-            record["state"] = "restored"
+            record["state"] = "restoring"
             self._save(record)
+            try:
+                if before is None:
+                    path.unlink(missing_ok=True)
+                else:
+                    self._replace_bytes(path, before)
+            except OSError:
+                record["state"] = "ready"
+                with suppress(OSError):
+                    self._save(record)
+                raise
+            record["state"] = "restored"
+            try:
+                self._save(record)
+            except OSError as exc:
+                return {
+                    "restored": True,
+                    "path": record["path"],
+                    "warning": f"文件已恢复，但版本状态暂未写入；重新打开后会核对：{exc}",
+                }
             return {"restored": True, "path": record["path"]}
+
+    @staticmethod
+    def _replace_bytes(path: Path, content: bytes) -> None:
+        fd, temp_path = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
+        temporary = Path(temp_path)
+        try:
+            with os.fdopen(fd, "wb") as stream:
+                stream.write(content)
+                stream.flush()
+                os.fsync(stream.fileno())
+            if path.exists():
+                os.chmod(temporary, stat.S_IMODE(path.stat().st_mode))
+            os.replace(temporary, path)
+        finally:
+            with suppress(OSError):
+                temporary.unlink(missing_ok=True)

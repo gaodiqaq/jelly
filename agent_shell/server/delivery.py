@@ -47,7 +47,8 @@ def create_task_bundle(manager, session_id: str) -> Path:
     root = session.cwd.resolve()
     if not root.is_dir():
         raise ValueError("任务工作目录不可用，无法导出成果")
-    versions = manager.changes(session_id).list(include_diff=False)
+    journal = manager.changes(session_id)
+    versions = journal.list(include_diff=False)
     paths = sorted(
         {
             item["path"]
@@ -74,6 +75,7 @@ def create_task_bundle(manager, session_id: str) -> Path:
         "project_name": project["name"] if project else None,
         "files": [],
         "omitted": [],
+        "warnings": journal.issues(),
     }
     provenance = [
         {key: item.get(key) for key in ("id", "path", "tool", "state", "created_at")}

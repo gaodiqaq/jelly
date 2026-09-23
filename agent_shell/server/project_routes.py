@@ -90,7 +90,8 @@ def project_router(managers, auth, runs):
     def list_artifacts(request: Request, session_id: str):
         mgr = managers.for_user(request.state.user)
         root = mgr.workspace(session_id)
-        versions = mgr.changes(session_id).list(include_diff=False)
+        journal = mgr.changes(session_id)
+        versions = journal.list(include_diff=False)
         paths = {}
         for version in versions:
             if version["state"] in {"ready", "restored", "snapshot_failed"}:
@@ -115,7 +116,7 @@ def project_router(managers, auth, runs):
                     "extension": path.suffix.lower(),
                 }
             )
-        return {"artifacts": artifacts}
+        return {"artifacts": artifacts, "warnings": journal.issues()}
 
     @router.get("/sessions/{session_id}/delivery")
     def download_task_delivery(request: Request, session_id: str):
