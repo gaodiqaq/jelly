@@ -151,6 +151,50 @@ def test_project_settings_and_session_root_survive_reload(studio):
     assert client.get("/api/projects").json()["projects"][0]["task_count"] == 1
 
 
+def test_project_archive_is_reversible_and_preserves_existing_work(studio):
+    client, _, _ = studio
+    data, sid, cwd = project(studio, "archive")
+    run(client, sid, "kept")
+
+    response = client.patch(
+        f"/api/projects/{data['id']}/archive", json={"archived": True}
+    )
+    assert response.status_code == 200, response.text
+    archived = response.json()
+    assert archived["archived_at"]
+    assert (cwd / "result.md").read_text() == "kept"
+    listed = client.get("/api/projects").json()["projects"][0]
+    assert listed["archived_at"] == archived["archived_at"]
+    assert listed["task_count"] == 1
+    assert (
+        client.post("/api/sessions", json={"project_id": data["id"]}).status_code == 409
+    )
+    assert client.post(f"/api/sessions/{sid}/run", json={"content": "blocked"}).status_code == 409
+    assert client.get(f"/api/sessions/{sid}/artifacts").status_code == 200
+
+    restored = client.patch(
+        f"/api/projects/{data['id']}/archive", json={"archived": False}
+    )
+    assert restored.status_code == 200
+    assert restored.json()["archived_at"] is None
+    assert client.post("/api/sessions", json={"project_id": data["id"]}).status_code == 200
+
+
+def test_running_project_cannot_be_archived(studio):
+    client, manager, _ = studio
+    data, sid, _ = project(studio, "busy-archive")
+    manager._running.add(sid)
+    try:
+        response = client.patch(
+            f"/api/projects/{data['id']}/archive", json={"archived": True}
+        )
+    finally:
+        manager._running.discard(sid)
+
+    assert response.status_code == 409
+    assert manager.projects.get(data["id"])["archived_at"] is None
+
+
 def test_project_readonly_overrides_other_settings(studio):
     client, manager, _ = studio
     data, sid, cwd = project(studio, "readonly", permission="readonly")
@@ -181,6 +225,25 @@ def test_invalid_project_does_not_create_session(studio, payload):
     assert client.post("/api/projects", json=payload).status_code == 400
     assert client.get("/api/projects").json()["projects"] == []
     assert client.post("/api/sessions", json={"project_id": "0" * 32}).status_code >= 400
+
+
+def test_corrupt_project_record_is_isolated_from_valid_catalogue(studio):
+    client, manager, _ = studio
+    valid, _, _ = project(studio, "healthy")
+    corrupt = manager.projects.directory / f"{'f' * 32}.json"
+    corrupt.write_text('{"id": "wrong", "name": 3}', encoding="utf-8")
+
+    response = client.get("/api/projects")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert [item["id"] for item in payload["projects"]] == [valid["id"]]
+    assert payload["projects"][0]["available"] is True
+    assert payload["warnings"] == [
+        {"file": corrupt.name, "message": "项目记录损坏，已从工作台隔离"}
+    ]
+    with pytest.raises(SessionError, match="损坏"):
+        manager.projects.get("f" * 32)
 
 
 def test_concurrent_project_runs_keep_their_own_roots(studio):

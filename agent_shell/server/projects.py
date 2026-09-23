@@ -24,10 +24,23 @@ class ProjectCreate(ProjectSettings):
     cwd: str = Field(min_length=1, max_length=4096)
 
 
+class ProjectArchive(BaseModel):
+    archived: bool
+
+
+class ProjectRecord(ProjectSettings):
+    id: str = Field(pattern=r"^[0-9a-f]{32}$")
+    cwd: str = Field(min_length=1, max_length=4096)
+    created_at: str = Field(min_length=1)
+    updated_at: str = ""
+    archived_at: str | None = None
+
+
 class ProjectStore:
     def __init__(self, directory: Path):
         self.directory = directory
         self._lock = threading.RLock()
+        self._issues: list[dict[str, str]] = []
 
     def _path(self, project_id: str) -> Path:
         if len(project_id) != 32 or any(c not in "0123456789abcdef" for c in project_id):
@@ -39,14 +52,50 @@ class ProjectStore:
             path = self._path(project_id)
             if not path.is_file():
                 raise SessionError("项目不存在")
-            return json.loads(path.read_text(encoding="utf-8"))
+            try:
+                project = self._normalise(json.loads(path.read_text(encoding="utf-8")))
+                if project["id"] != project_id:
+                    raise ValueError("项目 ID 与文件名不一致")
+                return project
+            except (OSError, ValueError, TypeError) as exc:
+                raise SessionError(f"项目记录损坏: {path.name}") from exc
+
+    @staticmethod
+    def _normalise(project: dict) -> dict:
+        """Add fields introduced after the first project schema without a migration step."""
+        normalised = dict(project)
+        normalised.setdefault("updated_at", normalised.get("created_at", ""))
+        normalised.setdefault("archived_at", None)
+        return ProjectRecord.model_validate(normalised).model_dump()
 
     def list(self) -> list[dict]:
         with self._lock:
-            return sorted(
-                [json.loads(p.read_text(encoding="utf-8")) for p in self.directory.glob("*.json")],
-                key=lambda p: p["created_at"],
-            )
+            projects = []
+            issues = []
+            for path in self.directory.glob("*.json"):
+                try:
+                    project = self._normalise(json.loads(path.read_text(encoding="utf-8")))
+                    if project["id"] != path.stem:
+                        raise ValueError("项目 ID 与文件名不一致")
+                    projects.append(project)
+                except (OSError, ValueError, TypeError):
+                    issues.append(
+                        {"file": path.name, "message": "项目记录损坏，已从工作台隔离"}
+                    )
+            self._issues = issues
+            return sorted(projects, key=lambda project: project["created_at"])
+
+    def issues(self) -> list[dict[str, str]]:
+        with self._lock:
+            return [dict(issue) for issue in self._issues]
+
+    def _write(self, project: dict) -> dict:
+        self.directory.mkdir(parents=True, exist_ok=True)
+        path = self._path(project["id"])
+        temporary = path.with_suffix(".tmp")
+        temporary.write_text(json.dumps(project, ensure_ascii=False), encoding="utf-8")
+        temporary.replace(path)
+        return project
 
     def save(self, body: ProjectSettings, project_id: str | None = None) -> dict:
         with self._lock:
@@ -62,13 +111,21 @@ class ProjectStore:
                     "id": uuid.uuid4().hex,
                     "cwd": str(root.resolve()),
                     "created_at": datetime.now(timezone.utc).isoformat(),
+                    "archived_at": None,
                 }
+            now = datetime.now(timezone.utc).isoformat()
             project.update(
-                name=body.name.strip(), model=body.model.strip(), permission=body.permission
+                name=body.name.strip(),
+                model=body.model.strip(),
+                permission=body.permission,
+                updated_at=now,
             )
-            self.directory.mkdir(parents=True, exist_ok=True)
-            path = self._path(project["id"])
-            temporary = path.with_suffix(".tmp")
-            temporary.write_text(json.dumps(project, ensure_ascii=False), encoding="utf-8")
-            temporary.replace(path)
-            return project
+            return self._write(project)
+
+    def set_archived(self, project_id: str, archived: bool) -> dict:
+        with self._lock:
+            project = self.get(project_id)
+            now = datetime.now(timezone.utc).isoformat()
+            project["archived_at"] = now if archived else None
+            project["updated_at"] = now
+            return self._write(project)

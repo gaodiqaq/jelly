@@ -117,6 +117,12 @@ class SessionCreate(BaseModel):
     project_id: str | None = None
 
 
+class PreviewRequest(BaseModel):
+    path: str = Field(min_length=1, max_length=4096)
+    session_id: str | None = None
+    project_id: str | None = None
+
+
 class ConfigUpdate(BaseModel):
     """更新运行时配置请求体。
 
@@ -357,6 +363,8 @@ def create_app(
         managers._managers[None] = manager
     auth = _make_auth_dependency(users)
     run_services = {}
+    preview_tickets: dict[str, tuple[float, str]] = {}
+    preview_lock = threading.RLock()
 
     def runs(request):
         user = request.state.user
@@ -382,13 +390,22 @@ def create_app(
         response.headers["Cross-Origin-Resource-Policy"] = "same-origin"
         response.headers["Content-Security-Policy"] = (
             "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
-            "img-src 'self' blob: data:; connect-src 'self' ws: wss:; object-src 'none'; "
+            "img-src 'self' blob: data:; frame-src 'self'; "
+            "connect-src 'self' ws: wss:; object-src 'none'; "
             "base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
         )
         if request.url.path.startswith("/api/"):
             response.headers["Cache-Control"] = "no-store"
             if request.url.path == "/api/file/raw":
                 response.headers["Content-Security-Policy"] = "default-src 'none'; sandbox"
+            elif request.url.path.startswith("/api/file/preview/"):
+                response.headers["X-Frame-Options"] = "SAMEORIGIN"
+                response.headers["Content-Security-Policy"] = (
+                    "default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval'; "
+                    "style-src 'unsafe-inline'; img-src data: blob:; media-src data: blob:; "
+                    "font-src data:; connect-src 'none'; form-action 'none'; base-uri 'none'; "
+                    "frame-ancestors 'self'; sandbox allow-scripts"
+                )
         elif request.url.path.startswith("/assets/"):
             response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
         elif response.headers.get("content-type", "").startswith("text/html"):
@@ -618,6 +635,41 @@ def create_app(
         media_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
         return FileResponse(target, media_type=media_type, filename=target.name)
 
+    @app.post("/api/file/preview", dependencies=[Depends(auth)])
+    def prepare_html_preview(request: Request, body: PreviewRequest) -> dict[str, str]:
+        """Mint a short-lived, single-use capability for one sandboxed HTML preview."""
+        root = managers.for_user(request.state.user).workspace(
+            body.session_id, body.project_id
+        )
+        target = _workspace_path(root, body.path)
+        if target.suffix.lower() not in {".htm", ".html"} or not target.is_file():
+            raise HTTPException(status_code=400, detail="只能预览工作区内的 HTML 文件")
+        try:
+            with target.open("rb") as stream:
+                data = stream.read(_MAX_PREVIEW_BYTES + 1)
+        except OSError as exc:
+            raise HTTPException(status_code=400, detail=f"无法读取文件: {exc}") from exc
+        if len(data) > _MAX_PREVIEW_BYTES or b"\x00" in data[:4096]:
+            raise HTTPException(status_code=400, detail="文件过大或不是文本 HTML")
+        ticket = secrets.token_urlsafe(32)
+        now = time.monotonic()
+        with preview_lock:
+            expired = [key for key, (deadline, _) in preview_tickets.items() if deadline <= now]
+            for key in expired:
+                preview_tickets.pop(key, None)
+            if len(preview_tickets) >= 128:
+                raise HTTPException(status_code=429, detail="预览请求过多，请稍后重试")
+            preview_tickets[ticket] = (now + 60, data.decode("utf-8", errors="replace"))
+        return {"url": f"/api/file/preview/{ticket}"}
+
+    @app.get("/api/file/preview/{ticket}")
+    def show_html_preview(ticket: str) -> Response:
+        with preview_lock:
+            entry = preview_tickets.pop(ticket, None)
+        if entry is None or entry[0] <= time.monotonic():
+            raise HTTPException(status_code=404, detail="预览已过期，请重新开启")
+        return Response(content=entry[1], media_type="text/html; charset=utf-8")
+
     def recipes(request):
         return RecipeStore(managers.for_user(request.state.user)._session_dir / "recipes")
 
@@ -706,9 +758,12 @@ def create_app(
     @app.post("/api/sessions", dependencies=[Depends(auth)])
     def create_session(request: Request, body: SessionCreate | None = None) -> dict[str, Any]:
         """新建会话（使用当前运行时模型）。"""
-        session = managers.for_user(request.state.user).create_session(
-            body.project_id if body else None
-        )
+        try:
+            session = managers.for_user(request.state.user).create_session(
+                body.project_id if body else None
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         return {
             "session_id": session.session_id,
             "project_id": session.project_id,
@@ -751,9 +806,10 @@ def create_app(
     )
     def delete_session(request: Request, session_id: str) -> dict[str, str]:
         """删除会话。"""
-        mgr = managers.for_user(request.state.user)
         try:
-            mgr.delete_session(session_id)
+            runs(request).delete(session_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         except SessionError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         return {"deleted": session_id}

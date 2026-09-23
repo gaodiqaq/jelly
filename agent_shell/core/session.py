@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import secrets
-import shutil
 import tempfile
+import threading
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -76,6 +78,7 @@ class Session:
         self.title = ""
         self.messages: list[Message] = []
         self.skill_addon: str = ""  # Skill 增强的系统提示词
+        self._lock = threading.RLock()
         self.created_at = datetime.now(timezone.utc).isoformat()
         try:
             self.session_dir.mkdir(parents=True, exist_ok=True)
@@ -87,10 +90,18 @@ class Session:
         """会话文件路径（``{session_id}.jsonl``）。"""
         return self.session_dir / f"{self.session_id}.jsonl"
 
+    @classmethod
+    def path_for(cls, session_dir: Path, session_id: str) -> Path:
+        """Resolve a session file name without reading potentially corrupt content."""
+        if not _SESSION_ID_RE.fullmatch(session_id):
+            raise SessionError(f"非法会话 ID: {session_id}")
+        return session_dir / f"{session_id}.jsonl"
+
     @property
     def message_count(self) -> int:
         """消息条数。"""
-        return len(self.messages)
+        with self._lock:
+            return len(self.messages)
 
     def add_message(self, message: Message) -> None:
         """追加一条消息到历史。
@@ -98,7 +109,8 @@ class Session:
         Args:
             message: 任意角色消息。
         """
-        self.messages.append(message)
+        with self._lock:
+            self.messages.append(message)
 
     def set_title(self, title: str) -> None:
         """设置会话标题（持久化由调用方负责）。
@@ -106,11 +118,13 @@ class Session:
         Args:
             title: 新的标题。
         """
-        self.title = title
+        with self._lock:
+            self.title = title
 
     def clear_skill(self) -> None:
         """清除当前激活的 Skill 增强提示词（用户手动关闭技能时调用）。"""
-        self.skill_addon = ""
+        with self._lock:
+            self.skill_addon = ""
 
     def snapshot(self, max_chars: int) -> list[Message]:
         """返回裁剪后的消息列表（含系统消息，优先保留最新上下文）。
@@ -124,12 +138,13 @@ class Session:
         Returns:
             裁剪后的消息列表（不影响内部状态）。
         """
-        rest = (
-            self.messages[1:]
-            if self.messages and self.messages[0].role == "system"
-            else list(self.messages)
-        )
-        return self._trim_to_latest(rest, max_chars)
+        with self._lock:
+            rest = (
+                self.messages[1:]
+                if self.messages and self.messages[0].role == "system"
+                else list(self.messages)
+            )
+            return self._trim_to_latest(rest, max_chars)
 
     def _trim_to_latest(self, rest: list[Message], budget: int) -> list[Message]:
         """从最新消息向前挑选，保持工具调用组完整。
@@ -204,30 +219,39 @@ class Session:
         Raises:
             SessionError: 写入失败。
         """
-        lines: list[str] = [
-            json.dumps(
-                {
-                    "session_id": self.session_id,
-                    "title": self.title,
-                    "created_at": self.created_at,
-                    "updated_at": datetime.now(timezone.utc).isoformat(),
-                    "model": self.model,
-                    "cwd": str(self.cwd),
-                    "project_id": self.project_id,
-                    "skill_addon": self.skill_addon,
-                },
-                ensure_ascii=False,
-            )
-        ]
-        for message in self.messages:
-            lines.append(message.model_dump_json())
-        try:
-            fd, tmp_path = tempfile.mkstemp(dir=str(self.session_dir), suffix=".tmp")
-            with open(fd, "w", encoding="utf-8") as fh:
-                fh.write("\n".join(lines) + "\n")
-            shutil.move(tmp_path, self.file_path)
-        except OSError as exc:
-            raise SessionError(f"会话写入失败 {self.file_path}: {exc}") from exc
+        temporary: Path | None = None
+        with self._lock:
+            lines: list[str] = [
+                json.dumps(
+                    {
+                        "session_id": self.session_id,
+                        "title": self.title,
+                        "created_at": self.created_at,
+                        "updated_at": datetime.now(timezone.utc).isoformat(),
+                        "model": self.model,
+                        "cwd": str(self.cwd),
+                        "project_id": self.project_id,
+                        "skill_addon": self.skill_addon,
+                    },
+                    ensure_ascii=False,
+                )
+            ]
+            lines.extend(message.model_dump_json() for message in self.messages)
+            try:
+                fd, tmp_path = tempfile.mkstemp(dir=str(self.session_dir), suffix=".tmp")
+                temporary = Path(tmp_path)
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                    fh.write("\n".join(lines) + "\n")
+                    fh.flush()
+                    os.fsync(fh.fileno())
+                os.replace(temporary, self.file_path)
+                temporary = None
+            except OSError as exc:
+                raise SessionError(f"会话写入失败 {self.file_path}: {exc}") from exc
+            finally:
+                if temporary is not None:
+                    with suppress(OSError):
+                        temporary.unlink(missing_ok=True)
         return self.file_path
 
     @classmethod
@@ -269,9 +293,7 @@ class Session:
         Raises:
             SessionError: 会话不存在或文件损坏。
         """
-        path = session_dir / f"{session_id}.jsonl"
-        if not _SESSION_ID_RE.match(session_id):
-            raise SessionError(f"非法会话 ID: {session_id}")
+        path = cls.path_for(session_dir, session_id)
         if not path.is_file():
             raise SessionError(f"会话不存在: {session_id}（文件 {path}）")
         try:
@@ -285,8 +307,11 @@ class Session:
             meta = json.loads(lines[0])
         except json.JSONDecodeError as exc:
             raise SessionError(f"会话元信息损坏: {path}: {exc}") from exc
+        stored_id = meta.get("session_id", session_id)
+        if stored_id != session_id:
+            raise SessionError(f"会话元信息 ID 与文件名不一致: {path}")
         session = cls(
-            meta.get("session_id", session_id),
+            session_id,
             session_dir,
             meta.get("model", "unknown"),
             Path(meta.get("cwd", str(Path.cwd()))),

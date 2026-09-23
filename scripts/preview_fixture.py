@@ -54,6 +54,16 @@ DOCUMENT = """# 轻量级项目管理工具\n产品方案
 选取三个真实任务，验证首次交付时间、返工次数和成果复用率。这是一份设计草案，尚未进行外部用户访谈。
 """
 
+INTERACTIVE_DEMO = """<!doctype html>
+<html lang="zh-CN"><meta charset="utf-8"><title>交互原型</title>
+<style>body{font:16px system-ui;padding:40px;background:#f3f6f2;color:#23352a}
+button{padding:10px 16px}</style>
+<h1>交互原型</h1><p>点击次数：<strong id="count">0</strong></p>
+<button id="demo" onclick="increment()">试一下</button>
+<script>function increment(){const counter=document.getElementById('count');
+counter.textContent=Number(counter.textContent)+1}</script>
+</html>"""
+
 
 class PreviewLLM:
     model = "preview/offline"
@@ -79,6 +89,15 @@ class PreviewLLM:
                         arguments={
                             "path": "功能清单.csv",
                             "content": "功能,优先级\n项目工作区,P0\n成果预览,P0\n工作配方,P1\n",
+                            "overwrite": True,
+                        },
+                    ),
+                    ToolCall(
+                        id="prototype",
+                        name="write",
+                        arguments={
+                            "path": "交互原型.html",
+                            "content": INTERACTIVE_DEMO,
                             "overwrite": True,
                         },
                     ),

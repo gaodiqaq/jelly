@@ -115,6 +115,44 @@ def test_auth_required_when_token_configured(settings: Settings) -> None:
     assert ok_query.status_code == 401
 
 
+def test_html_preview_is_scoped_sandboxed_and_single_use(settings: Settings) -> None:
+    client = make_client(settings, [], api_token="secret")
+    html = settings.cwd / "prototype.html"
+    html.write_text("<button onclick=\"this.textContent='clicked'\">try</button>", encoding="utf-8")
+    assert client.post("/api/file/preview", json={"path": html.name}).status_code == 401
+
+    prepared = client.post(
+        "/api/file/preview",
+        json={"path": html.name},
+        headers={"Authorization": "Bearer secret"},
+    )
+    assert prepared.status_code == 200
+    url = prepared.json()["url"]
+    assert url.startswith("/api/file/preview/")
+    shown = client.get(url)
+    assert shown.status_code == 200
+    assert shown.text == html.read_text(encoding="utf-8")
+    assert shown.headers["cache-control"] == "no-store"
+    assert shown.headers["x-frame-options"] == "SAMEORIGIN"
+    assert "sandbox allow-scripts" in shown.headers["content-security-policy"]
+    assert "connect-src 'none'" in shown.headers["content-security-policy"]
+    assert client.get(url).status_code == 404
+
+    outside = settings.cwd.parent / "outside.html"
+    outside.write_text("outside", encoding="utf-8")
+    denied = client.post(
+        "/api/file/preview",
+        json={"path": "../outside.html"},
+        headers={"Authorization": "Bearer secret"},
+    )
+    assert denied.status_code >= 400
+    assert client.post(
+        "/api/file/preview",
+        json={"path": "prototype.txt"},
+        headers={"Authorization": "Bearer secret"},
+    ).status_code == 400
+
+
 def test_create_and_list_session(client: TestClient) -> None:
     """新建会话并可列出。"""
     created = client.post("/api/sessions")
@@ -323,9 +361,15 @@ def test_manual_rename_overrides_auto_title(client: TestClient) -> None:
     assert entry["title"] == "手动名字"
 
 
-def test_delete_session(client: TestClient) -> None:
+def test_delete_session(client: TestClient, settings: Settings) -> None:
     """删除会话后：列表移除、历史 404。"""
     session_id = client.post("/api/sessions").json()["session_id"]
+    changes = settings.session_dir / "changes" / session_id
+    changes.mkdir(parents=True)
+    (changes / "history.json").write_text("{}", encoding="utf-8")
+    run = settings.session_dir / "runs" / f"{session_id}.json"
+    run.parent.mkdir(parents=True)
+    run.write_text("{}", encoding="utf-8")
     response = client.delete(f"/api/sessions/{session_id}")
     assert response.status_code == 200
     assert response.json()["deleted"] == session_id
@@ -333,6 +377,7 @@ def test_delete_session(client: TestClient) -> None:
     ids = [s["session_id"] for s in client.get("/api/sessions").json()["sessions"]]
     assert session_id not in ids
     assert client.get(f"/api/sessions/{session_id}/messages").status_code == 404
+    assert not changes.exists() and not run.exists()
 
 
 def test_delete_session_not_found(client: TestClient) -> None:

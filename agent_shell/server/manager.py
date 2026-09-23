@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import itertools
+import shutil
 import threading
 import time
 from collections.abc import Awaitable, Callable
@@ -148,6 +149,8 @@ class SessionManager:
             新会话实例（已含系统消息）。
         """
         project = self.projects.get(project_id) if project_id else None
+        if project and project.get("archived_at"):
+            raise ValueError("项目已归档，请先恢复项目再新建任务")
         cwd = Path(project["cwd"]) if project else self._settings.cwd
         if not cwd.is_dir():
             raise SessionError("工作目录不存在，请检查项目目录")
@@ -219,6 +222,14 @@ class SessionManager:
 
     def project_for(self, session: Session) -> dict | None:
         return self.projects.get(session.project_id) if session.project_id else None
+
+    def ensure_session_runnable(self, session_id: str) -> None:
+        session = self.get_session(session_id)
+        project = self.project_for(session)
+        if project and project.get("archived_at"):
+            raise ValueError("项目已归档，请先恢复项目再继续任务")
+        if not session.cwd.is_dir():
+            raise ValueError("项目目录不存在，请检查目录后重试")
 
     def serialize_messages(self, session: Session) -> list[dict[str, Any]]:
         """将会话消息历史序列化为前端可渲染的 JSON。
@@ -327,19 +338,28 @@ class SessionManager:
         Raises:
             SessionError: 会话不存在或文件删除失败。
         """
-        self.get_session(session_id)
         if session_id in self._running:
             raise SessionError("任务正在运行，请先停止后再删除")
+        path = Session.path_for(self._session_dir, session_id)
+        if not path.is_file():
+            raise SessionError(f"会话不存在: {session_id}")
+        sidecars = [
+            self._session_dir / "changes" / session_id,
+            self._session_dir / "runs" / f"{session_id}.json",
+        ]
+        try:
+            for sidecar in sidecars:
+                if sidecar.is_dir():
+                    shutil.rmtree(sidecar)
+                else:
+                    sidecar.unlink(missing_ok=True)
+            path.unlink()
+        except OSError as exc:
+            raise SessionError(f"删除会话数据失败 {session_id}: {exc}") from exc
         self._sessions.pop(session_id, None)
         self._todo.pop(session_id, None)
         self._running.discard(session_id)
         self._cancel.pop(session_id, None)
-        path = self._session_dir / f"{session_id}.jsonl"
-        if path.is_file():
-            try:
-                path.unlink()
-            except OSError as exc:
-                raise SessionError(f"删除会话文件失败 {path}: {exc}") from exc
 
     def clear_skill(self, session_id: str) -> bool:
         """清除会话当前激活的 skill（前端"✕"按钮调用）。
@@ -586,6 +606,8 @@ class SessionManager:
             Agent 实例。
         """
         project = self.project_for(session)
+        if project and project.get("archived_at"):
+            raise SessionError("项目已归档，请先恢复项目再继续任务")
         settings = deepcopy(self._settings)
         settings.cwd = session.cwd
         if not settings.cwd.is_dir():

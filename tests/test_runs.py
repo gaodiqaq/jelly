@@ -2,6 +2,8 @@ import asyncio
 import json
 import threading
 
+import pytest
+
 from agent_shell.config import PermissionsConfig, Settings
 from agent_shell.errors import AgentInterrupted
 from agent_shell.runtime import ProviderStore
@@ -80,6 +82,31 @@ def test_restart_marks_run_interrupted(tmp_path):
     state = runs.snapshot(sid)
     assert not state["busy"] and state["approval"] is None
     assert "中断" in state["status"]
+
+
+def test_corrupt_run_state_keeps_session_available(tmp_path):
+    runs, sid = service(tmp_path, WaitingLLM())
+    path = runs._path(sid)
+    path.parent.mkdir(parents=True)
+    path.write_text("{broken", encoding="utf-8")
+    state = runs.snapshot(sid)
+    assert state["busy"] is False
+    assert "损坏" in state["status"]
+    assert state["history"] == []
+
+
+def test_failed_run_state_write_does_not_lock_session(tmp_path, monkeypatch):
+    runs, sid = service(tmp_path, WaitingLLM())
+    before = runs.snapshot(sid)
+
+    def fail(_):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(runs, "_save", fail)
+    with pytest.raises(OSError, match="disk full"):
+        runs.start(sid, "hello")
+    assert runs.snapshot(sid) == before
+    assert sid not in runs.tasks
 
 
 def test_history_matches_tool_outputs_by_id(tmp_path):

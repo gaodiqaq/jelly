@@ -86,21 +86,32 @@ function PermCurrentIcon({ mode }) {
 }
 
 function ApprovalCard({ approval, onDecide }) {
-  const allowRef = useRef(null)
+  const denyRef = useRef(null)
+  const [deciding, setDeciding] = useState(false)
+  const [decisionError, setDecisionError] = useState('')
   const argsText =
     typeof approval.arguments === 'string'
       ? approval.arguments
       : JSON.stringify(approval.arguments, null, 2)
   useEffect(() => {
     const previousFocus = document.activeElement
-    allowRef.current?.focus()
+    setDecisionError('')
+    setDeciding(false)
+    denyRef.current?.focus()
     return () => {
       if (previousFocus instanceof HTMLElement && previousFocus.isConnected) previousFocus.focus()
     }
   }, [approval.id])
 
+  const decide = async decision => {
+    if (deciding) return
+    setDeciding(true); setDecisionError('')
+    try { await onDecide(approval.id, decision) }
+    catch (error) { setDecisionError(error.message); setDeciding(false) }
+  }
+
   return (
-    <div className="approval-card" role="alertdialog" aria-labelledby="approval-title" aria-describedby="approval-hint">
+    <div className="approval-card" role="alertdialog" aria-modal="true" aria-labelledby="approval-title" aria-describedby="approval-hint" aria-busy={deciding} onKeyDown={event => keepFocusInside(event, event.currentTarget)}>
       <div className="approval-head">
         <span className="approval-icon"><Icon.shield /></span>
         <span className="approval-title" id="approval-title">权限确认</span>
@@ -112,17 +123,18 @@ function ApprovalCard({ approval, onDecide }) {
         </span>
       </div>
       {argsText !== '{}' && <pre className="approval-args">{argsText}</pre>}
+      {decisionError && <div className="approval-error" role="alert">{decisionError}</div>}
       <div className="approval-actions">
-        <button ref={allowRef} className="approval-btn allow" onClick={() => onDecide(approval.id, 'approve')}>
+        <button className="approval-btn allow" disabled={deciding} onClick={() => decide('approve')}>
           允许
         </button>
-        <button className="approval-btn deny" onClick={() => onDecide(approval.id, 'deny')}>
+        <button ref={denyRef} className="approval-btn deny" disabled={deciding} onClick={() => decide('deny')}>
           拒绝
         </button>
-        <button className="approval-btn ghost" onClick={() => onDecide(approval.id, 'approve_all')}>
+        <button className="approval-btn ghost" disabled={deciding} onClick={() => decide('approve_all')}>
           本轮始终允许
         </button>
-        <button className="approval-btn ghost" onClick={() => onDecide(approval.id, 'deny_all')}>
+        <button className="approval-btn ghost" disabled={deciding} onClick={() => decide('deny_all')}>
           本轮始终拒绝
         </button>
       </div>
@@ -190,14 +202,19 @@ export default function App() {
   const [sessionsLoaded, setSessionsLoaded] = useState(false)
   const [projects, setProjects] = useState([])
   const [projectsLoaded, setProjectsLoaded] = useState(false)
+  const [projectsLoadError, setProjectsLoadError] = useState('')
+  const [projectWarnings, setProjectWarnings] = useState([])
   const [projectId, setProjectId] = useState(() => localStorage.getItem('jelly_project') || null)
   const [projectDialog, setProjectDialog] = useState(null)
+  const [showArchived, setShowArchived] = useState(false)
+  const [projectAction, setProjectAction] = useState(null)
   const [taskFilter, setTaskFilter] = useState('all')
   const [taskSearch, setTaskSearch] = useState('')
   const [conversationTab, setConversationTab] = useState('chat')
   const [artifactRevision, setArtifactRevision] = useState(0)
   const [openedFiles, setOpenedFiles] = useState([])
   const [current, setCurrent] = useState(() => localStorage.getItem('jelly_current') || null)
+  const [sessionsLoadError, setSessionsLoadError] = useState('')
   const [history, setHistory] = useState(EMPTY_HISTORY)
   const [token, setToken] = useState(authToken())
   const [authRequired, setAuthRequired] = useState(false)
@@ -215,6 +232,9 @@ export default function App() {
   const [showSkillMenu, setShowSkillMenu] = useState(false)
   const [propsDraft, setPropsDraft] = useState({ model: '', cwd: '', providers: {} })
   const [testing, setTesting] = useState(false)
+  const [settingsSaving, setSettingsSaving] = useState(false)
+  const [settingsError, setSettingsError] = useState('')
+  const [providerAction, setProviderAction] = useState(null)
   const [stopping, setStopping] = useState(false)
   const [usage, setUsage] = useState(null)
   const [skills, setSkills] = useState([])
@@ -233,6 +253,9 @@ export default function App() {
   const [navOpen, setNavOpen] = useState(false)
   const activeSession = sessions.find(s => s.session_id === current)
   const activeProject = projects.find(p => p.id === (activeSession?.project_id || projectId))
+  const activeProjects = projects.filter(project => !project.archived_at)
+  const archivedProjects = projects.filter(project => project.archived_at)
+  const projectArchived = !!activeProject?.archived_at
   const effectiveModel = activeProject?.model || model
   const effectivePermission = activeProject?.permission || permMode
   const artifactState = useArtifacts(current, busy, artifactRevision)
@@ -247,6 +270,7 @@ export default function App() {
     localStorage.removeItem('agent_web_token')
     setToken(''); setAuthRequired(true); setSessions([]); setProjects([])
     setSessionsLoaded(false); setProjectsLoaded(false)
+    setSessionsLoadError(''); setProjectsLoadError(''); setProjectWarnings([])
     setCurrent(null); setProjectId(null); setHistory(EMPTY_HISTORY); setPending(null)
     setOpenedFiles([]); setWsFile(null); setError('')
   }, [])
@@ -254,13 +278,17 @@ export default function App() {
     window.addEventListener('jelly:unauthorized', lockWorkspace)
     return () => window.removeEventListener('jelly:unauthorized', lockWorkspace)
   }, [lockWorkspace])
+  useEffect(() => { if (showSettings) setSettingsError('') }, [showSettings])
 
   const loadProjects = useCallback(async () => {
     try {
       const data = await api('/api/projects')
       setProjects(data.projects)
+      setProjectWarnings(data.warnings || [])
+      setProjectsLoadError('')
     } catch (e) {
-      setError(e.message)
+      setProjectsLoadError(e.message)
+      setError(`加载项目失败: ${e.message}`)
     } finally {
       setProjectsLoaded(true)
     }
@@ -288,7 +316,7 @@ export default function App() {
   }, [])
 
   const loadProviders = useCallback(() => {
-    api('/api/providers')
+    return api('/api/providers')
       .then((data) => {
         setProviders(data.providers || [])
         // 收集所有可用模型
@@ -304,11 +332,11 @@ export default function App() {
   }, [])
 
   const loadConfig = useCallback(() => {
-    api('/api/config')
+    return api('/api/config')
       .then((data) => {
         setConfig(data)
         setPropsDraft({ model: data.model || '', cwd: data.cwd || '', providers: draftProviders(data.providers) })
-        loadProviders()
+        return loadProviders()
       })
       .catch(() => {})
   }, [loadProviders])
@@ -366,6 +394,7 @@ export default function App() {
 
   useEffect(() => {
     if (!navOpen) return
+    requestAnimationFrame(() => document.querySelector('.sidebar .workspace-selector')?.focus())
     const closeOnEscape = event => {
       if (event.key === 'Escape') {
         setNavOpen(false)
@@ -407,7 +436,7 @@ export default function App() {
 
   useEffect(() => {
     const newFiles = artifacts.filter(file => !knownArtifacts.current.has(file.path))
-    const next = newFiles.find(file => /\.(md|markdown|html?)$/i.test(file.path)) || newFiles[0]
+    const next = newFiles.find(file => /\.(md|markdown)$/i.test(file.path)) || newFiles.find(file => /\.html?$/i.test(file.path)) || newFiles[0]
     for (const file of artifacts) knownArtifacts.current.add(file.path)
     const wideScreen = window.matchMedia('(min-width: 1101px)').matches
     if (next && wideScreen && !wsFile) openFile(next.path)
@@ -438,8 +467,12 @@ export default function App() {
 
   const refreshSessions = useCallback(() => {
     api('/api/sessions')
-      .then((data) => setSessions(data.sessions || []))
+      .then((data) => {
+        setSessions(data.sessions || [])
+        setSessionsLoadError('')
+      })
       .catch((e) => {
+        setSessionsLoadError(e.message)
         setError(
           e.status === 401
             ? '访问口令已失效，请重新登录'
@@ -450,15 +483,15 @@ export default function App() {
   }, [])
 
   useEffect(() => {
-    if (sessionsLoaded && current && !sessions.some(session => session.session_id === current)) {
+    if (sessionsLoaded && !sessionsLoadError && current && !sessions.some(session => session.session_id === current)) {
       setCurrent(null)
     }
-  }, [sessionsLoaded, sessions, current])
+  }, [sessionsLoaded, sessionsLoadError, sessions, current])
   useEffect(() => {
-    if (projectsLoaded && projectId && !projects.some(project => project.id === projectId)) {
+    if (projectsLoaded && !projectsLoadError && projectId && !projects.some(project => project.id === projectId)) {
       setProjectId(null)
     }
-  }, [projectsLoaded, projects, projectId])
+  }, [projectsLoaded, projectsLoadError, projects, projectId])
 
   useEffect(() => {
     refreshSessions()
@@ -470,6 +503,10 @@ export default function App() {
 
   const newSession = useCallback(async () => {
     setError('')
+    if (projectArchived) {
+      setError('项目已归档，请先恢复项目再新建任务')
+      return
+    }
     try {
       const data = await api('/api/sessions', { method: 'POST', body: JSON.stringify({ project_id: projectId }) })
       setSessions(previous => [{
@@ -482,9 +519,11 @@ export default function App() {
         running: false,
       }, ...previous.filter(session => session.session_id !== data.session_id)])
       setCurrent(data.session_id)
+      setNavOpen(false)
       setHistory(EMPTY_HISTORY)
       setPending(null)
       refreshSessions()
+      requestAnimationFrame(() => draftRef.current?.focus())
     } catch (e) {
       setError(
           e.status === 401
@@ -492,16 +531,16 @@ export default function App() {
           : `创建会话失败: ${e.message}`,
       )
     }
-  }, [refreshSessions, projectId])
+  }, [refreshSessions, projectId, projectArchived])
 
   const startWith = useCallback(
     async (text) => {
-      if (busy) return
+      if (busy || projectArchived) return
       if (!current) await newSession()
       setDraft(text)
       requestAnimationFrame(() => draftRef.current && draftRef.current.focus())
     },
-    [busy, current, newSession],
+    [busy, current, newSession, projectArchived],
   )
 
   const openSession = useCallback(async (id) => {
@@ -521,6 +560,28 @@ export default function App() {
     setProjectId(id); setCurrent(null); setHistory([]); setPending(null); setWsFile(null)
     setTaskFilter('all'); setTaskSearch(''); setNavOpen(false)
   }
+
+  const setProjectArchived = useCallback(async (id, archived) => {
+    setProjectAction(id)
+    try {
+      const saved = await api(`/api/projects/${id}/archive`, {
+        method: 'PATCH',
+        body: JSON.stringify({ archived }),
+      })
+      setProjects(previous => previous.map(project => project.id === id ? saved : project))
+      return saved
+    } catch (e) {
+      throw new Error(`${archived ? '归档' : '恢复'}项目失败: ${e.message}`)
+    } finally {
+      setProjectAction(null)
+    }
+  }, [])
+
+  const restoreProject = useCallback(async id => {
+    setError('')
+    try { await setProjectArchived(id, false) }
+    catch (e) { setError(e.message) }
+  }, [setProjectArchived])
 
   const renameSession = useCallback(async (id, title) => {
     try {
@@ -559,7 +620,7 @@ export default function App() {
     setPendingApproval(state.approval || null)
     setUsage(state.usage || null)
     if (state.skill) setActiveSkill(state.skill)
-    setError(state.error || '')
+    if (state.error) setError(state.error)
   }, setError)
 
   useEffect(() => {
@@ -569,6 +630,11 @@ export default function App() {
   useEffect(() => { if (!busy) refreshSessions() }, [busy, refreshSessions])
   const submit = async text => {
     if (!current || busy || !text.trim()) return
+    if (projectArchived) {
+      setError('项目已归档，请先恢复项目再继续任务')
+      return
+    }
+    setError('')
     setBusy(true)
     try { await run.send(text.trim()); setDraft('') }
     catch { setBusy(false) }
@@ -578,11 +644,13 @@ export default function App() {
     try { await run.stop() } catch { setStopping(false) }
   }
   const decideApproval = async (id, decision) => {
-    try { await run.approve(id, decision); setPendingApproval(null) } catch {}
+    await run.approve(id, decision)
+    setPendingApproval(null)
   }
 
   const saveConfig = useCallback(async () => {
-    setError('')
+    if (settingsSaving) return
+    setSettingsSaving(true); setSettingsError('')
     try {
       const { model: modelName, cwd: cwdDraft } = propsDraft
       if (modelName && modelName.trim() && modelName.trim() !== config?.model) {
@@ -608,9 +676,11 @@ export default function App() {
       loadConfig()
       setModel(propsDraft.model.trim() || model)
     } catch (e) {
-      setError(`保存配置失败: ${e.message}`)
+      setSettingsError(`保存配置失败: ${e.message}`)
+    } finally {
+      setSettingsSaving(false)
     }
-  }, [propsDraft, config, loadConfig, model])
+  }, [settingsSaving, propsDraft, config, loadConfig, model])
 
   const switchModel = useCallback(async (modelName) => {
     if (!modelName || modelName === effectiveModel) {
@@ -636,7 +706,8 @@ export default function App() {
   }, [effectiveModel, activeProject, loadProjects])
 
   const addProvider = useCallback(async (provider) => {
-    setError('')
+    if (providerAction) return
+    setProviderAction('add'); setSettingsError('')
     try {
       await api('/api/providers', {
         method: 'POST',
@@ -644,10 +715,13 @@ export default function App() {
       })
       await Promise.all([loadProviders(), loadConfig()])
     } catch (e) {
-      setError(`添加提供商失败: ${e.message}`)
-      throw e
+      const message = `添加提供商失败: ${e.message}`
+      setSettingsError(message)
+      throw new Error(message)
+    } finally {
+      setProviderAction(null)
     }
-  }, [loadProviders, loadConfig])
+  }, [providerAction, loadProviders, loadConfig])
 
   const authenticate = useCallback(async (candidate) => {
     sessionStorage.setItem('agent_web_token', candidate)
@@ -671,19 +745,21 @@ export default function App() {
   }, [])
 
   const removeProvider = useCallback(async (name) => {
-    setError('')
+    if (providerAction) return
+    setProviderAction(name); setSettingsError('')
     try {
       await api(`/api/providers/${name}`, { method: 'DELETE' })
-      loadProviders()
-      loadConfig()
+      await Promise.all([loadProviders(), loadConfig()])
     } catch (e) {
-      setError(`删除提供商失败: ${e.message}`)
+      setSettingsError(`删除提供商失败: ${e.message}`)
+    } finally {
+      setProviderAction(null)
     }
-  }, [loadProviders, loadConfig])
+  }, [providerAction, loadProviders, loadConfig])
 
   const testConfig = useCallback(async () => {
     setTesting(true)
-    setError('')
+    setSettingsError('')
     try {
       const body = { model: propsDraft.model.trim() || config?.model }
       const data = await api('/api/config/test', {
@@ -691,9 +767,9 @@ export default function App() {
         body: JSON.stringify(body),
       })
       setConfig((c) => ({ ...c, test: data }))
-      if (!data.ok) setError(`连接测试失败: ${data.error}`)
+      if (!data.ok) setSettingsError(`连接测试失败: ${data.error}`)
     } catch (e) {
-      setError(`连接测试失败: ${e.message}`)
+      setSettingsError(`连接测试失败: ${e.message}`)
     } finally {
       setTesting(false)
     }
@@ -703,10 +779,13 @@ export default function App() {
   if (!sessionsLoaded || !projectsLoaded) {
     return <div className="boot-screen" role="status" aria-live="polite"><span className="jelly-cube wobble" aria-hidden="true" /><span>正在准备工作台…</span></div>
   }
+  if ((projectsLoadError && projects.length === 0) || (sessionsLoadError && sessions.length === 0)) {
+    return <div className="fatal-screen load-failure" role="alert"><span className="jelly-cube fatal-cube" aria-hidden="true" /><span className="eyebrow">WORKSPACE UNAVAILABLE</span><h1>工作台暂时没有准备好。</h1><p>{projectsLoadError ? `项目读取失败：${projectsLoadError}` : `任务读取失败：${sessionsLoadError}`}</p><div className="fatal-actions"><button className="solid-button" onClick={() => { setProjectsLoaded(false); setSessionsLoaded(false); loadProjects(); refreshSessions() }}>重新读取</button>{token && <button className="quiet-button" onClick={lockWorkspace}>重新输入访问口令</button>}</div></div>
+  }
 
   return (
     <div className={`layout${navOpen ? ' nav-open' : ''}${wsOpen ? ' ws-open' : ''}`}>
-      <aside className="sidebar" id="workspace-navigation" aria-label="项目与任务">
+      <aside className="sidebar" id="workspace-navigation" aria-label="项目与任务" onKeyDown={event => { if (navOpen && window.matchMedia('(max-width: 760px)').matches) keepFocusInside(event, event.currentTarget) }}>
         <div className="sidebar-header">
           <div className="brand">
             <span className="jelly-cube brand-cube" aria-hidden="true" />
@@ -716,11 +795,11 @@ export default function App() {
             </span>
           </div>
         </div>
-        <button className="workspace-selector" onClick={() => activeProject ? setProjectDialog(activeProject) : setProjectDialog({})}>
-          <span className="workspace-monogram">{(activeProject?.name || 'J').slice(0, 1)}</span><span>{activeProject?.name || '我的工作空间'}</span><Icon.chevron />
+        <button className={`workspace-selector${projectArchived ? ' archived' : ''}${activeProject?.available === false ? ' unavailable' : ''}`} onClick={() => activeProject ? setProjectDialog(activeProject) : setProjectDialog({})}>
+          <span className="workspace-monogram">{(activeProject?.name || 'J').slice(0, 1)}</span><span>{activeProject?.name || '我的工作空间'}</span>{projectArchived ? <small>已归档</small> : activeProject?.available === false ? <small>目录不可用</small> : null}<Icon.chevron />
         </button>
-        <button className="new-chat" onClick={() => projectsLoaded && !projects.length ? setProjectDialog({}) : newSession()}>
-          <Icon.plus /> 新建任务 <kbd>＋</kbd>
+        <button className="new-chat" disabled={projectArchived} title={projectArchived ? '恢复项目后即可新建任务' : '新建任务'} onClick={() => projectsLoaded && !activeProjects.length ? setProjectDialog({}) : newSession()}>
+          <Icon.plus /> {projectArchived ? '项目已归档' : '新建任务'} <kbd>＋</kbd>
         </button>
         <nav className="main-navigation" aria-label="工作空间导航">
           <button className={!projectId && taskFilter === 'all' ? 'active' : ''} onClick={() => selectProject(null)}><Icon.folder /><span>工作台</span><small>{sessions.length}</small></button>
@@ -729,9 +808,19 @@ export default function App() {
         <label className="task-search"><span>⌕</span><input aria-label="搜索任务" placeholder="搜索任务" value={taskSearch} onChange={e => setTaskSearch(e.target.value)} /></label>
         <div className="nav-section-heading"><span>项目</span><button className="quiet-button" aria-label="新建项目" onClick={() => setProjectDialog({})}>＋</button></div>
         <nav className="project-list" aria-label="项目">
-          {projects.map(project => <button key={project.id} className={projectId === project.id ? 'active' : ''} onClick={() => selectProject(project.id)}><Icon.folder /><span>{project.name}</span><small>{sessions.filter(s => s.project_id === project.id).length}</small></button>)}
-          {!projects.length && <button className="create-project-link" onClick={() => setProjectDialog({})}>创建第一个项目 ↗</button>}
+          {activeProjects.map(project => <button key={project.id} className={`${projectId === project.id ? 'active' : ''}${project.available === false ? ' unavailable' : ''}`} title={project.available === false ? '绑定的工作目录当前不可用' : project.name} onClick={() => selectProject(project.id)}><Icon.folder /><span>{project.name}</span>{project.available === false && <i aria-label="目录不可用">!</i>}<small>{sessions.filter(s => s.project_id === project.id).length}</small></button>)}
+          {!activeProjects.length && <button className="create-project-link" onClick={() => setProjectDialog({})}>创建新项目 ↗</button>}
         </nav>
+        {!!projectWarnings.length && <div className="catalog-warning" role="status">已隔离 {projectWarnings.length} 个损坏的项目记录，其他项目不受影响。</div>}
+        {!!archivedProjects.length && <div className="archived-projects">
+          <button className="archived-toggle" aria-expanded={showArchived} aria-controls="archived-project-list" onClick={() => setShowArchived(value => !value)}><span>已归档</span><small>{archivedProjects.length}</small><Icon.chevron /></button>
+          {showArchived && <div id="archived-project-list" className="archived-project-list">
+            {archivedProjects.map(project => <div key={project.id} className={projectId === project.id ? 'active' : ''}>
+              <button className="archived-project-open" onClick={() => selectProject(project.id)}><Icon.folder /><span>{project.name}</span></button>
+              <button className="archived-project-restore" disabled={projectAction === project.id} aria-label={`恢复项目 ${project.name}`} onClick={() => restoreProject(project.id)}>{projectAction === project.id ? '…' : '恢复'}</button>
+            </div>)}
+          </div>}
+        </div>}
         <div className="nav-section-heading"><span>{taskFilter === 'running' ? '进行中' : '最近任务'}</span><span>{visibleSessions.length}</span></div>
         <ul className="session-list">
           {visibleSessions.map((s) => (
@@ -748,7 +837,7 @@ export default function App() {
         {visibleSessions.length === 0 && <div className="empty-sessions">这里还没有任务<br />从一个想法开始。</div>}
         <div className="sidebar-bottom"><span className="sidebar-status"><i /> 本地工作空间</span><button onClick={() => setShowSettings(true)}><Icon.gear /> 设置与连接</button></div>
       </aside>
-      <button type="button" className="nav-backdrop" aria-label="关闭项目与任务导航" onClick={() => setNavOpen(false)} />
+      <button type="button" className="nav-backdrop" aria-label="关闭项目与任务导航" onClick={() => { setNavOpen(false); requestAnimationFrame(() => document.querySelector('.menu-btn')?.focus()) }} />
 
       <main className="chat">
         <header className="chat-header">
@@ -806,19 +895,20 @@ export default function App() {
           ref={messagesRef}
           onScroll={e => { const el = e.currentTarget; followOutput.current = el.scrollHeight - el.scrollTop - el.clientHeight < 100 }}
         >
-          {projectsLoaded && projects.length === 0 && !current && conversationTab === 'chat' ? (
+          {projectsLoaded && activeProjects.length === 0 && !projectId && !current && conversationTab === 'chat' ? (
             <div className="empty-state onboarding-state">
               <div className="onboarding-card">
                 <span className="eyebrow">WELCOME TO JELLY</span>
-                <h1>先给工作一个安静的空间。</h1>
-                <p>绑定一个本地目录。之后的任务、对话、文件与版本都会留在这个项目里。</p>
+                <h1>{archivedProjects.length ? '工作台已经收拾好了。' : '先给工作一个安静的空间。'}</h1>
+                <p>{archivedProjects.length ? '已归档项目仍完整保留。恢复一个继续打磨，或为新想法创建空间。' : '绑定一个本地目录。之后的任务、对话、文件与版本都会留在这个项目里。'}</p>
                 <ol>
                   <li><span>01</span><div><strong>创建项目</strong><small>选择已有目录，文件始终由你保管</small></div></li>
                   <li><span>02</span><div><strong>说清目标</strong><small>果冻会边执行边留下可检查的记录</small></div></li>
                   <li><span>03</span><div><strong>直接看成果</strong><small>文档、代码与网页会在右侧自动打开</small></div></li>
                 </ol>
                 <div className="onboarding-actions">
-                  <button className="solid-button" onClick={() => setProjectDialog({})}>创建第一个项目</button>
+                  <button className="solid-button" onClick={() => setProjectDialog({})}>{archivedProjects.length ? '创建新项目' : '创建第一个项目'}</button>
+                  {!!archivedProjects.length && <button className="quiet-button" onClick={() => { setShowArchived(true); setNavOpen(true) }}>查看已归档项目</button>}
                   <button className="quiet-button" onClick={() => setShowSettings(true)}>设置模型连接</button>
                 </div>
               </div>
@@ -882,15 +972,16 @@ export default function App() {
           </div>
         )}
         <div className="composer">
+          {projectArchived && <div className="archived-project-notice" role="status"><span><strong>项目已归档</strong> · 当前内容仅供查看</span><button type="button" disabled={projectAction === activeProject.id} onClick={() => restoreProject(activeProject.id)}>{projectAction === activeProject.id ? '恢复中…' : '恢复项目'}</button></div>}
           <div className="composer-box">
             <textarea
               ref={draftRef}
-              placeholder={current ? '描述你想做的作品，或继续打磨眼前的成果…' : '请先新建或选择会话'}
-              disabled={!current || busy}
+              placeholder={projectArchived ? '恢复项目后即可继续对话' : current ? '描述你想做的作品，或继续打磨眼前的成果…' : '请先新建或选择会话'}
+              disabled={!current || busy || projectArchived}
               value={draft}
               onChange={(e) => setDraft(e.target.value)}
               onKeyDown={(e) => {
-                if (e.key === 'Enter' && !e.shiftKey) {
+                if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing && e.keyCode !== 229) {
                   e.preventDefault()
                   submit(draft)
                 }
@@ -1109,7 +1200,7 @@ export default function App() {
                     className="send-btn"
                     title="发送"
                     aria-label="发送"
-                    disabled={!current || !draft.trim()}
+                    disabled={!current || !draft.trim() || projectArchived}
                     onClick={() => submit(draft)}
                   >
                     <Icon.send />
@@ -1118,7 +1209,7 @@ export default function App() {
               </div>
             </div>
           </div>
-          <div className="composer-footnote"><span>{activeProject?.name || 'Jelly Studio'} · 你的工作，由你掌控</span><span>Enter 发送 · Shift + Enter 换行</span></div>
+          <div className="composer-footnote"><span>{activeProject?.name || 'Jelly Studio'} · {projectArchived ? '已归档，内容完整保留' : '你的工作，由你掌控'}</span><span>{projectArchived ? '恢复后继续' : 'Enter 发送 · Shift + Enter 换行'}</span></div>
         </div>
         <div className="sr-only" role="status" aria-live="polite" aria-atomic="true">
           {pendingApproval ? '任务已暂停，等待权限确认。' : stopping ? '正在停止任务。' : busy ? (status || '任务正在进行。') : current && history.length ? '任务已完成，可以继续输入。' : ''}
@@ -1148,12 +1239,15 @@ export default function App() {
           </aside>
         </>
       )}
-      {projectDialog && <ProjectDialog project={projectDialog.id ? projectDialog : null} onClose={() => setProjectDialog(null)} onSaved={async project => { setProjectDialog(null); await loadProjects(); if (!projectDialog.id) selectProject(project.id) }} />}
+      {projectDialog && <ProjectDialog project={projectDialog.id ? projectDialog : null} onClose={() => setProjectDialog(null)} onArchive={setProjectArchived} onSaved={async project => { setProjectDialog(null); await loadProjects(); if (!projectDialog.id) selectProject(project.id) }} />}
       {showSettings && (
         <SettingsModal
           config={config}
           draft={propsDraft}
           testing={testing}
+          saving={settingsSaving}
+          error={settingsError}
+          providerAction={providerAction}
           onChange={setPropsDraft}
           onSave={saveConfig}
           onTest={testConfig}
@@ -1243,7 +1337,7 @@ function SessionItem({ s, active, onOpen, onRename, onDelete }) {
   )
 }
 
-function SettingsModal({ config, draft, testing, onChange, onSave, onTest, onClose, onAddProvider, onRemoveProvider }) {
+function SettingsModal({ config, draft, testing, saving, error, providerAction, onChange, onSave, onTest, onClose, onAddProvider, onRemoveProvider }) {
   const providers = draft.providers || {}
   const test = config?.test
   const [showAddProvider, setShowAddProvider] = useState(false)
@@ -1284,6 +1378,8 @@ function SettingsModal({ config, draft, testing, onChange, onSave, onTest, onClo
           <span className="modal-title" id="settings-title"><Icon.gear /> 模型与 API Key</span>
           <button className="modal-close" aria-label="关闭设置" onClick={onClose}><Icon.close /></button>
         </div>
+
+        {error && <div className="settings-error" role="alert">{error}</div>}
 
         <div className="modal-section">
           <div className="field-label">当前模型（litellm 格式，带提供商前缀）</div>
@@ -1355,8 +1451,8 @@ function SettingsModal({ config, draft, testing, onChange, onSave, onTest, onClo
                 value={newProvider.default_model}
                 onChange={(e) => setNewProvider({ ...newProvider, default_model: e.target.value })}
               />
-              <button className="btn primary" onClick={handleAddProvider}>
-                确认添加
+              <button className="btn primary" disabled={providerAction === 'add'} onClick={handleAddProvider}>
+                {providerAction === 'add' ? '添加中…' : '确认添加'}
               </button>
             </div>
           )}
@@ -1376,6 +1472,8 @@ function SettingsModal({ config, draft, testing, onChange, onSave, onTest, onClo
                   <button
                     className="btn-remove-provider"
                     title="删除提供商"
+                    aria-label={`删除提供商 ${name}`}
+                    disabled={providerAction === name}
                     onClick={() => {
                       if (window.confirm(`确定删除提供商「${name}」？`)) {
                         onRemoveProvider(name)
@@ -1425,8 +1523,8 @@ function SettingsModal({ config, draft, testing, onChange, onSave, onTest, onClo
         )}
 
         <div className="modal-actions">
-          <button className="btn primary" onClick={onSave}>保存</button>
-          <button className="btn plain" onClick={onTest} disabled={testing}>
+          <button className="btn primary" onClick={onSave} disabled={saving || testing || !!providerAction}>{saving ? '保存中…' : '保存'}</button>
+          <button className="btn plain" onClick={onTest} disabled={testing || saving || !!providerAction}>
             {testing ? '测试中…' : '测试连接'}
           </button>
           <button className="btn plain" onClick={onClose}>关闭</button>

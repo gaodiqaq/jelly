@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
+import DOMPurify from 'dompurify'
 import Markdown from './Markdown'
 import { api, authHeaders } from './api'
 import Changes from './Changes'
@@ -119,6 +120,9 @@ function FileTree({ onOpenFile, activeFile, scope }) {
 function Preview({ path, onBack, onOpenFile, scope, revision, artifact }) {
   const [state, setState] = useState({ loading: true })
   const [source, setSource] = useState(false)
+  const [interactive, setInteractive] = useState(false)
+  const [interactiveUrl, setInteractiveUrl] = useState('')
+  const [interactiveError, setInteractiveError] = useState('')
   const [rawUrl, setRawUrl] = useState('')
   const documentRef = useRef(null)
   const rawEndpoint = `/api/file/raw?path=${encodeURIComponent(path)}${scope ? `&${scope}` : ''}`
@@ -152,6 +156,24 @@ function Preview({ path, onBack, onOpenFile, scope, revision, artifact }) {
       .catch(error => { if (error.name !== 'AbortError') setState({ error: error.message }) })
     return () => { controller.abort(); if (objectUrl) URL.revokeObjectURL(objectUrl) }
   }, [path, rawEndpoint, revision])
+
+  useEffect(() => {
+    if (!interactive || !state.data || source) return
+    let alive = true
+    setInteractiveUrl(''); setInteractiveError('')
+    const parameters = new URLSearchParams(scope)
+    api('/api/file/preview', {
+      method: 'POST',
+      body: JSON.stringify({
+        path,
+        session_id: parameters.get('session_id') || null,
+        project_id: parameters.get('project_id') || null,
+      }),
+    })
+      .then(result => { if (alive) setInteractiveUrl(result.url) })
+      .catch(error => { if (alive) setInteractiveError(error.message) })
+    return () => { alive = false }
+  }, [interactive, state.data, source, path, scope, revision])
 
   async function downloadRaw() {
     try {
@@ -199,7 +221,14 @@ function Preview({ path, onBack, onOpenFile, scope, revision, artifact }) {
       </div>
     )
   } else if (/\.html?$/i.test(path) && !data.truncated) {
-    body = <iframe className="studio-web-preview" title={`网页预览：${data.name}`} sandbox="" referrerPolicy="no-referrer" srcDoc={'<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; img-src data:; style-src \'unsafe-inline\'; font-src data:;">' + data.content} />
+    const policy = "default-src 'none'; img-src data:; style-src 'unsafe-inline'; font-src data:;"
+    const staticHtml = DOMPurify.sanitize(data.content, { WHOLE_DOCUMENT: true })
+    body = <div className="web-preview-shell">
+      <div className="web-preview-safety"><span>{interactive ? '隔离交互预览 · 网络访问已关闭' : '安全静态预览 · 脚本未运行'}</span><button type="button" aria-pressed={interactive} onClick={() => setInteractive(value => !value)}>{interactive ? '停止交互' : '启用交互'}</button></div>
+      {interactive
+        ? interactiveError ? <div className="ws-hint ws-center" role="alert">交互预览无法打开：{interactiveError}</div> : interactiveUrl ? <iframe key={interactiveUrl} className="studio-web-preview" title={`网页预览：${data.name}`} sandbox="allow-scripts" referrerPolicy="no-referrer" src={interactiveUrl} /> : <div className="ws-hint ws-center">正在准备隔离预览…</div>
+        : <iframe key="static" className="studio-web-preview" title={`网页预览：${data.name}`} sandbox="" referrerPolicy="no-referrer" srcDoc={`<meta http-equiv="Content-Security-Policy" content="${policy}">` + staticHtml} />}
+    </div>
   } else if (isMd) {
     body = <div className="document-sheet" ref={documentRef}><div className="document-kicker">JELLY DOCUMENT <span>{artifact ? `v${artifact.version}` : '本地文件'}</span></div>
       {introduction && <Markdown text={introduction} onOpenFile={onOpenFile} />}
@@ -217,7 +246,7 @@ function Preview({ path, onBack, onOpenFile, scope, revision, artifact }) {
           <ChevronIcon /> 文件列表
         </button>
         <span className="ws-preview-path" title={data ? data.path : path}>{artifact ? `v${artifact.version} · 已保存` : '本地文件'}</span>
-        {data && !data.is_binary && <button className="preview-mode" onClick={() => setSource(v => !v)}>{source ? '预览' : '源文件'}</button>}
+        {data && !data.is_binary && <button className="preview-mode" onClick={() => { setSource(value => !value); setInteractive(false) }}>{source ? '预览' : '源文件'}</button>}
         {data && !data.is_binary && (
           <button className="ws-raw-link" onClick={downloadRaw} title="下载原始文件">
             ↓ 下载

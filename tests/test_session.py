@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from agent_shell.core import session as session_module
 from agent_shell.core.session import Session
 from agent_shell.errors import SessionError
 from agent_shell.types import AssistantMessage, ToolCall, ToolMessage, UserMessage
@@ -49,6 +50,25 @@ def test_save_resume_roundtrip(session_dir: Path) -> None:
     assert restored.messages[2].tool_calls[0].arguments == {"path": "."}
 
 
+def test_failed_atomic_replace_preserves_previous_session_file(
+    session_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session = _build_session(session_dir)
+    session.save()
+    original = session.file_path.read_bytes()
+    session.add_message(UserMessage(content="must not partially replace the file"))
+
+    def fail_replace(_source, _target):
+        raise OSError("simulated replace failure")
+
+    monkeypatch.setattr(session_module.os, "replace", fail_replace)
+    with pytest.raises(SessionError, match="会话写入失败"):
+        session.save()
+
+    assert session.file_path.read_bytes() == original
+    assert list(session_dir.glob("*.tmp")) == []
+
+
 def test_resume_missing_session(session_dir: Path) -> None:
     """恢复不存在的会话抛 SessionError。"""
     with pytest.raises(SessionError, match="会话不存在"):
@@ -65,6 +85,19 @@ def test_resume_corrupt_message(session_dir: Path) -> None:
     )
     with pytest.raises(SessionError, match="损坏"):
         Session.resume(session_dir, session.session_id)
+
+
+def test_resume_rejects_metadata_id_mismatch(session_dir: Path) -> None:
+    session = _build_session(session_dir)
+    session.save()
+    lines = session.file_path.read_text(encoding="utf-8").splitlines()
+    lines[0] = lines[0].replace(session.session_id, "different-safe-id")
+    session.file_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    with pytest.raises(SessionError, match="ID 与文件名不一致"):
+        Session.resume(session_dir, session.session_id)
+
+    assert not (session_dir / "different-safe-id.jsonl").exists()
 
 
 def test_list_sessions_sorted_by_update(session_dir: Path) -> None:

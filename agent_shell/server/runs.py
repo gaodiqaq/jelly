@@ -31,14 +31,24 @@ class RunService:
         path = self._path(session_id)
         if session_id not in self.states:
             if path.exists():
-                state = json.loads(path.read_text(encoding="utf-8"))
-                if state["busy"]:
-                    state.update(
-                        busy=False,
-                        status="服务重启，执行已中断；请检查文件后继续",
-                        approval=None,
-                        pending=None,
-                    )
+                try:
+                    state = json.loads(path.read_text(encoding="utf-8"))
+                    if not isinstance(state, dict) or not isinstance(state.get("busy"), bool):
+                        raise ValueError("invalid run state")
+                except (OSError, ValueError, TypeError):
+                    state = {
+                        "busy": False,
+                        "status": "运行记录损坏，已忽略；历史消息仍可查看",
+                        "pending": None,
+                    }
+                else:
+                    if state["busy"]:
+                        state.update(
+                            busy=False,
+                            status="服务重启，执行已中断；请检查文件后继续",
+                            approval=None,
+                            pending=None,
+                        )
                 self.states[session_id] = state
             else:
                 self.states[session_id] = {"busy": False, "status": "", "pending": None}
@@ -48,6 +58,7 @@ class RunService:
         return state
 
     def start(self, session_id, content):
+        self.manager.ensure_session_runnable(session_id)
         state = self.snapshot(session_id)
         if state["busy"] or session_id in self.manager._running:
             raise ValueError("任务正在运行")
@@ -61,8 +72,13 @@ class RunService:
             "error": "",
             "usage": None,
         }
+        previous = self.states[session_id]
         self.states[session_id] = state
-        self._save(session_id)
+        try:
+            self._save(session_id)
+        except OSError:
+            self.states[session_id] = previous
+            raise
 
         async def emit(event):
             item = event.model_dump()
@@ -112,8 +128,10 @@ class RunService:
                     if state.get("stopping")
                     else ("执行失败" if state["error"] else "本轮完成")
                 )
-                self._save(session_id)
-                self.tasks.pop(session_id, None)
+                try:
+                    self._save(session_id)
+                finally:
+                    self.tasks.pop(session_id, None)
 
         self.tasks[session_id] = asyncio.create_task(work())
         return state
@@ -124,3 +142,12 @@ class RunService:
             self.states[session_id].update(stopping=True, status="正在停止，等待执行器退出…")
             self.manager.request_cancel(session_id)
         return {"requested": state["busy"]}
+
+    def delete(self, session_id):
+        task = self.tasks.get(session_id)
+        state = self.states.get(session_id, {})
+        if (task is not None and not task.done()) or state.get("busy"):
+            raise ValueError("任务正在运行，请先停止后再删除")
+        self.manager.delete_session(session_id)
+        self.tasks.pop(session_id, None)
+        self.states.pop(session_id, None)

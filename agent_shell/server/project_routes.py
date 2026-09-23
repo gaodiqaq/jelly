@@ -4,7 +4,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 
-from agent_shell.server.projects import ProjectCreate, ProjectSettings
+from agent_shell.server.projects import ProjectArchive, ProjectCreate, ProjectSettings
 
 
 def project_router(managers, auth):
@@ -14,11 +14,19 @@ def project_router(managers, auth):
     def list_projects(request: Request):
         mgr = managers.for_user(request.state.user)
         sessions = mgr.list_sessions()
+        projects = mgr.projects.list()
         return {
             "projects": [
-                {**p, "task_count": sum(s["project_id"] == p["id"] for s in sessions)}
-                for p in mgr.projects.list()
-            ]
+                {
+                    **project,
+                    "available": Path(project["cwd"]).is_dir(),
+                    "task_count": sum(
+                        session["project_id"] == project["id"] for session in sessions
+                    ),
+                }
+                for project in projects
+            ],
+            "warnings": mgr.projects.issues(),
         }
 
     @router.post("/projects")
@@ -32,6 +40,19 @@ def project_router(managers, auth):
     def update_project(request: Request, project_id: str, body: ProjectSettings):
         try:
             return managers.for_user(request.state.user).projects.save(body, project_id)
+        except (ValueError, OSError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @router.patch("/projects/{project_id}/archive")
+    def archive_project(request: Request, project_id: str, body: ProjectArchive):
+        mgr = managers.for_user(request.state.user)
+        if body.archived and any(
+            session["project_id"] == project_id and session["running"]
+            for session in mgr.list_sessions()
+        ):
+            raise HTTPException(status_code=409, detail="项目仍有任务正在运行，请先停止后再归档")
+        try:
+            return mgr.projects.set_archived(project_id, body.archived)
         except (ValueError, OSError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
