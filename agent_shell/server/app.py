@@ -412,7 +412,7 @@ def create_app(
             response.headers["Cache-Control"] = "no-cache"
         return response
 
-    app.include_router(project_router(managers, auth))
+    app.include_router(project_router(managers, auth, runs))
 
     @app.get("/api/health")
     def health() -> dict[str, str]:

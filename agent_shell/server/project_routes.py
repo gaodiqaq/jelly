@@ -4,7 +4,11 @@ import os
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import FileResponse
+from starlette.background import BackgroundTask
 
+from agent_shell.errors import SessionError
+from agent_shell.server.delivery import create_task_bundle
 from agent_shell.server.projects import (
     ManagedProjectCreate,
     ProjectArchive,
@@ -19,7 +23,7 @@ def managed_root(user: str | None) -> Path:
     return (root / user if user else root).resolve()
 
 
-def project_router(managers, auth):
+def project_router(managers, auth, runs):
     router = APIRouter(prefix="/api", dependencies=[Depends(auth)])
 
     @router.get("/projects")
@@ -112,5 +116,25 @@ def project_router(managers, auth):
                 }
             )
         return {"artifacts": artifacts}
+
+    @router.get("/sessions/{session_id}/delivery")
+    def download_task_delivery(request: Request, session_id: str):
+        manager = managers.for_user(request.state.user)
+        try:
+            if runs(request).snapshot(session_id)["busy"] or session_id in manager._running:
+                raise HTTPException(status_code=409, detail="任务运行中，请完成或停止后再导出")
+            bundle = create_task_bundle(manager, session_id)
+        except SessionError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except OSError as exc:
+            raise HTTPException(status_code=400, detail=f"无法生成交付包: {exc}") from exc
+        return FileResponse(
+            bundle,
+            media_type="application/zip",
+            filename=f"Jelly-{session_id}.zip",
+            background=BackgroundTask(bundle.unlink, missing_ok=True),
+        )
 
     return router

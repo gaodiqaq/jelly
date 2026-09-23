@@ -150,6 +150,12 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px
 .artifact-info small { color: var(--text-mute); font-size: 10px; }
 .artifact-arrow { color: var(--text-faint); }
 .view-heading { margin: 12px 0 30px; }
+.deliverables-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; }
+.deliverables-heading .view-heading { margin-bottom: 16px; }
+.delivery-export { flex-shrink: 0; margin-top: 14px; padding: 8px 11px; border: 1px solid var(--line-strong); border-radius: 5px; background: var(--panel); color: var(--text-hi); cursor: pointer; font-size: 11px; }
+.delivery-export:hover { border-color: var(--peach-line); background: var(--peach-soft); }
+.delivery-export:disabled { opacity: .5; cursor: default; }
+@media (max-width: 720px) { .deliverables-heading { flex-direction: column; gap: 0; } .delivery-export { margin: 0 0 18px; } }
 .eyebrow, .studio-eyebrow { color: var(--text-faint); font: 9px var(--font-mono); letter-spacing: 1.7px; }
 .view-heading h2, .changes-view h2 { font-size: 20px; font-weight: 450; line-height: 1.5; color: var(--text-hi); }
 .view-heading p, .pane-empty { color: var(--text-mute); font-size: 12px; line-height: 1.8; }

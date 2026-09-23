@@ -229,6 +229,9 @@ def test_project_archive_is_reversible_and_preserves_existing_work(studio):
     )
     assert client.post(f"/api/sessions/{sid}/run", json={"content": "blocked"}).status_code == 409
     assert client.get(f"/api/sessions/{sid}/artifacts").status_code == 200
+    delivery = client.get(f"/api/sessions/{sid}/delivery")
+    assert delivery.status_code == 200
+    assert delivery.content.startswith(b"PK")
 
     restored = client.patch(
         f"/api/projects/{data['id']}/archive", json={"archived": False}
