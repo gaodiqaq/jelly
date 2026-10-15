@@ -1,5 +1,7 @@
 // Access-gate acceptance. Start preview_fixture.py with --token first.
-const { chromium } = require(process.env.JELLY_PLAYWRIGHT || 'playwright');
+const path = require('node:path');
+const playwright = process.env.JELLY_PLAYWRIGHT || require.resolve('playwright', { paths: [path.join(__dirname, '../webui')] });
+const { chromium } = require(playwright);
 const assert = require('node:assert/strict');
 
 (async () => {

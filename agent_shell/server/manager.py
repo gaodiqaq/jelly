@@ -17,6 +17,7 @@ import shutil
 import threading
 import time
 from collections.abc import Awaitable, Callable
+from contextlib import contextmanager
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
@@ -81,6 +82,7 @@ class SessionManager:
         self._llm = llm or LLMClient(settings, self._store)
         self._session_dir = session_dir or settings.session_dir
         self.projects = ProjectStore(self._session_dir / "projects")
+        self._lifecycle_lock = threading.RLock()
         self._running: set[str] = set()
         self._cancel: dict[str, threading.Event] = {}
         self._todo: dict[str, TodoStore] = {}
@@ -90,6 +92,16 @@ class SessionManager:
         # 手动审批等待中：session_id -> {"id", "event", "decision"}
         self._pending_approvals: dict[str, dict[str, Any]] = {}
         self._approval_seq = itertools.count()
+
+    @contextmanager
+    def lifecycle_operation(self, *, blocking: bool = True):
+        """Coordinate task starts with project backup and archive operations."""
+        if not self._lifecycle_lock.acquire(blocking=blocking):
+            raise ValueError("项目正在执行备份或设置操作，请稍后再试")
+        try:
+            yield
+        finally:
+            self._lifecycle_lock.release()
 
     # ---------- 权限模式 ----------
 
@@ -415,15 +427,25 @@ class SessionManager:
             await emit(ErrorEvent(message=str(exc)))
             await emit(DoneEvent())
             return
-        if session_id in self._running:
+        if not self._lifecycle_lock.acquire(blocking=False):
+            await emit(ErrorEvent(message="项目正在执行备份或设置操作，请稍后再试"))
+            await emit(DoneEvent())
+            return
+        try:
+            already_running = session_id in self._running
+            if not already_running:
+                self._running.add(session_id)
+        finally:
+            self._lifecycle_lock.release()
+        if already_running:
             await emit(ErrorEvent(message="该会话正在运行中，请等待本轮完成后再发送新消息"))
             await emit(DoneEvent())
             return
-        self._running.add(session_id)
         try:
             await self._run_turn(session_id, session, user_input, emit)
         finally:
-            self._running.discard(session_id)
+            with self._lifecycle_lock:
+                self._running.discard(session_id)
 
     async def _run_turn(
         self,

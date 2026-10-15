@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import os
+import signal
 import subprocess
+from contextlib import suppress
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -83,6 +85,106 @@ def _truncate(text: str, max_chars: int) -> str:
     return text[:max_chars] + MAX_OUTPUT_MARK
 
 
+class _WindowsJob:
+    """Bind a suspended command to a job before it can spawn any descendants."""
+
+    def __init__(self) -> None:
+        import ctypes
+        from ctypes import wintypes
+
+        class ThreadEntry(ctypes.Structure):
+            _fields_ = [
+                ("dwSize", wintypes.DWORD),
+                ("cntUsage", wintypes.DWORD),
+                ("th32ThreadID", wintypes.DWORD),
+                ("th32OwnerProcessID", wintypes.DWORD),
+                ("tpBasePri", wintypes.LONG),
+                ("tpDeltaPri", wintypes.LONG),
+                ("dwFlags", wintypes.DWORD),
+            ]
+
+        self.ctypes = ctypes
+        self.thread_entry = ThreadEntry
+        self.api = ctypes.WinDLL("kernel32", use_last_error=True)
+        declarations = {
+            "CreateJobObjectW": ([wintypes.LPVOID, wintypes.LPCWSTR], wintypes.HANDLE),
+            "OpenProcess": ([wintypes.DWORD, wintypes.BOOL, wintypes.DWORD], wintypes.HANDLE),
+            "AssignProcessToJobObject": ([wintypes.HANDLE, wintypes.HANDLE], wintypes.BOOL),
+            "TerminateJobObject": ([wintypes.HANDLE, wintypes.UINT], wintypes.BOOL),
+            "CreateToolhelp32Snapshot": ([wintypes.DWORD, wintypes.DWORD], wintypes.HANDLE),
+            "Thread32First": ([wintypes.HANDLE, ctypes.POINTER(ThreadEntry)], wintypes.BOOL),
+            "Thread32Next": ([wintypes.HANDLE, ctypes.POINTER(ThreadEntry)], wintypes.BOOL),
+            "OpenThread": ([wintypes.DWORD, wintypes.BOOL, wintypes.DWORD], wintypes.HANDLE),
+            "ResumeThread": ([wintypes.HANDLE], wintypes.DWORD),
+            "CloseHandle": ([wintypes.HANDLE], wintypes.BOOL),
+        }
+        for name, (arguments, result) in declarations.items():
+            function = getattr(self.api, name)
+            function.argtypes = arguments
+            function.restype = result
+        self.handle = self.api.CreateJobObjectW(None, None)
+        if not self.handle:
+            raise ctypes.WinError(ctypes.get_last_error())
+
+    def start(self, process: subprocess.Popen[str]) -> None:
+        # PROCESS_SET_QUOTA | PROCESS_TERMINATE are required for job assignment.
+        handle = self.api.OpenProcess(0x0100 | 0x0001, False, process.pid)
+        if not handle:
+            raise self.ctypes.WinError(self.ctypes.get_last_error())
+        try:
+            if not self.api.AssignProcessToJobObject(self.handle, handle):
+                raise self.ctypes.WinError(self.ctypes.get_last_error())
+        finally:
+            self.api.CloseHandle(handle)
+
+        # Popen closes the primary thread handle. Find and resume that thread only
+        # after job assignment; assigning an already-running shell has a spawn race.
+        snapshot = self.api.CreateToolhelp32Snapshot(0x00000004, 0)  # TH32CS_SNAPTHREAD
+        if snapshot == self.ctypes.c_void_p(-1).value:
+            raise self.ctypes.WinError(self.ctypes.get_last_error())
+        resumed = False
+        try:
+            entry = self.thread_entry()
+            entry.dwSize = self.ctypes.sizeof(entry)
+            available = self.api.Thread32First(snapshot, self.ctypes.byref(entry))
+            while available:
+                if entry.th32OwnerProcessID == process.pid:
+                    thread = self.api.OpenThread(0x0002, False, entry.th32ThreadID)
+                    if thread:
+                        try:
+                            count = self.api.ResumeThread(thread)
+                            resumed = resumed or 0 < count < 0xFFFFFFFF
+                        finally:
+                            self.api.CloseHandle(thread)
+                available = self.api.Thread32Next(snapshot, self.ctypes.byref(entry))
+        finally:
+            self.api.CloseHandle(snapshot)
+        if not resumed:
+            raise OSError("无法恢复命令进程的主线程")
+
+    def terminate(self) -> None:
+        if not self.api.TerminateJobObject(self.handle, 1):
+            raise self.ctypes.WinError(self.ctypes.get_last_error())
+
+    def close(self) -> None:
+        # Successful commands may deliberately start background services. Closing
+        # this job handle must not terminate those services.
+        self.api.CloseHandle(self.handle)
+
+
+def _terminate_command(process: subprocess.Popen[str], job: _WindowsJob | None) -> None:
+    try:
+        if job is not None:
+            job.terminate()
+        else:
+            with suppress(ProcessLookupError):
+                os.killpg(process.pid, signal.SIGKILL)
+    finally:
+        # Startup can fail before the suspended Windows process is assigned.
+        if process.poll() is None:
+            process.kill()
+
+
 def run_bash(ctx: ToolContext, args: BashArgs) -> ToolResult:
     """执行 bash 命令并捕获输出。
 
@@ -94,41 +196,74 @@ def run_bash(ctx: ToolContext, args: BashArgs) -> ToolResult:
         ToolResult: 退出码非 0 时 ``is_error=True``，content 包含 stdout 与 stderr。
     """
     timeout = args.timeout if args.timeout is not None else ctx.bash_timeout
+    process = None
+    job = None
+    communication_finished = False
     try:
-        completed = subprocess.run(
+        options: dict[str, Any] = {"start_new_session": True}
+        if os.name == "nt":
+            job = _WindowsJob()
+            # CREATE_SUSPENDED prevents cmd.exe from creating children before
+            # its job assignment. CREATE_NEW_PROCESS_GROUP isolates console signals.
+            options = {"creationflags": 0x00000004 | subprocess.CREATE_NEW_PROCESS_GROUP}
+        process = subprocess.Popen(
             _shell_command(args.command),
             cwd=str(ctx.cwd),
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
             encoding="utf-8",
             errors="replace",
-            timeout=timeout,
             env=_safe_environment(),
+            **options,
         )
-    except subprocess.TimeoutExpired as exc:
-        partial = exc.stdout or ""
-        return ToolResult(
-            content=(
-                f"命令超时（>{timeout}s）: {args.command}\n"
-                f"已输出:\n{_truncate(partial, ctx.max_output_chars)}"
-            ),
-            is_error=True,
-        )
+        if job is not None:
+            job.start(process)
+        try:
+            stdout, stderr = process.communicate(timeout=timeout)
+            communication_finished = True
+        except subprocess.TimeoutExpired:
+            _terminate_command(process, job)
+            stdout, stderr = process.communicate()
+            communication_finished = True
+            partial = (stdout or "") + (f"\n[stderr]\n{stderr}" if stderr else "")
+            return ToolResult(
+                content=(
+                    f"命令超时（>{timeout}s）: {args.command}\n"
+                    f"已输出:\n{_truncate(partial, ctx.max_output_chars)}"
+                ),
+                is_error=True,
+            )
     except OSError as exc:
         return ToolResult(
             content=f"无法启动 shell: {exc}",
             is_error=True,
         )
+    finally:
+        try:
+            if process is not None:
+                try:
+                    if not communication_finished:
+                        _terminate_command(process, job)
+                    process.wait()
+                finally:
+                    if process.stdout is not None:
+                        process.stdout.close()
+                    if process.stderr is not None:
+                        process.stderr.close()
+        finally:
+            if job is not None:
+                job.close()
 
-    stdout = completed.stdout or ""
-    stderr = completed.stderr or ""
+    stdout = stdout or ""
+    stderr = stderr or ""
     stderr_block = f"\n[stderr]\n{stderr}" if stderr else ""
     content = f"$ {args.command}\n{stdout}{stderr_block}".rstrip()
-    if completed.returncode != 0:
-        content += f"\n[退出码: {completed.returncode}]"
+    if process.returncode != 0:
+        content += f"\n[退出码: {process.returncode}]"
     return ToolResult(
         content=_truncate(content, ctx.max_output_chars),
-        is_error=completed.returncode != 0,
+        is_error=process.returncode != 0,
     )
 
 

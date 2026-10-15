@@ -206,6 +206,10 @@ export default function App() {
   const [projectWarnings, setProjectWarnings] = useState([])
   const [projectId, setProjectId] = useState(() => localStorage.getItem('jelly_project') || null)
   const [projectDialog, setProjectDialog] = useState(null)
+  const [projectNotice, setProjectNotice] = useState('')
+  const [checkingImport, setCheckingImport] = useState(false)
+  const [projectNoticeRetry, setProjectNoticeRetry] = useState(false)
+  const importCheckBaseline = useRef(new Set())
   const [showArchived, setShowArchived] = useState(false)
   const [projectAction, setProjectAction] = useState(null)
   const [taskFilter, setTaskFilter] = useState('all')
@@ -289,14 +293,41 @@ export default function App() {
       setProjects(data.projects)
       setProjectWarnings(data.warnings || [])
       setProjectsLoadError('')
+      return data
     } catch (e) {
       setProjectsLoadError(e.message)
       setError(`加载项目失败: ${e.message}`)
+      return null
     } finally {
       setProjectsLoaded(true)
     }
   }, [])
   useEffect(() => { loadProjects() }, [loadProjects, token])
+  useEffect(() => {
+    if (!checkingImport) return
+    let active = true
+    let timer
+    let failures = 0
+    async function check() {
+      const data = await loadProjects()
+      if (!active) return
+      failures = data ? 0 : failures + 1
+      if (data && !data.backup_busy) {
+        const imported = data.projects.filter(project => !importCheckBaseline.current.has(project.id))
+        setProjectNotice(imported.length
+          ? `项目恢复已完成 · ${imported.map(project => project.name).join('、')}`
+          : '服务器已结束恢复操作，项目列表已更新。请核对结果后再决定是否重试导入。')
+        setCheckingImport(false)
+        setProjectNoticeRetry(false)
+      } else if (failures >= 3) {
+        setProjectNotice('暂时无法连接服务器，恢复结果仍待确认。连接恢复后可重新检查。')
+        setCheckingImport(false)
+        setProjectNoticeRetry(true)
+      } else timer = window.setTimeout(check, 2000)
+    }
+    check()
+    return () => { active = false; window.clearTimeout(timer) }
+  }, [checkingImport, loadProjects])
   useEffect(() => {
     if (activeSession) setProjectId(activeSession.project_id || null)
   }, [current, activeSession?.project_id])
@@ -469,10 +500,12 @@ export default function App() {
   }, [])
 
   const refreshSessions = useCallback(() => {
-    api('/api/sessions')
+    return api('/api/sessions')
       .then((data) => {
-        setSessions(data.sessions || [])
+        const items = data.sessions || []
+        setSessions(items)
         setSessionsLoadError('')
+        return items
       })
       .catch((e) => {
         setSessionsLoadError(e.message)
@@ -481,6 +514,7 @@ export default function App() {
             ? '访问口令已失效，请重新登录'
             : `加载会话列表失败: ${e.message}`,
         )
+        return []
       })
       .finally(() => setSessionsLoaded(true))
   }, [])
@@ -559,9 +593,34 @@ export default function App() {
     setPendingApproval(null)
   }, [])
 
-  const selectProject = id => {
+  const selectProject = useCallback(id => {
     setProjectId(id); setCurrent(null); setHistory([]); setPending(null); setWsFile(null)
     setTaskFilter('all'); setTaskSearch(''); setNavOpen(false)
+  }, [])
+
+  const finishProjectImport = useCallback(async (project, taskCount) => {
+    setProjectDialog(null)
+    setProjectNotice(`「${project.name}」已恢复 · ${taskCount || 0} 个任务 · ${project.cwd}`)
+    setProjectNoticeRetry(false)
+    importCheckBaseline.current = new Set()
+    setProjects(previous => previous.some(item => item.id === project.id) ? previous : [...previous, project])
+    const projectList = await loadProjects()
+    selectProject(project.id)
+    const restored = await refreshSessions()
+    const latest = restored.find(session => session.project_id === project.id)
+    if (latest) await openSession(latest.session_id)
+    if (!projectList) {
+      setProjectNotice(`「${project.name}」已恢复，但项目列表刷新失败。可重新读取列表。`)
+      setProjectNoticeRetry(true)
+    }
+  }, [loadProjects, openSession, refreshSessions, selectProject])
+
+  function checkUncertainImport() {
+    importCheckBaseline.current = new Set(projects.map(project => project.id))
+    setProjectDialog(null)
+    setProjectNotice('恢复连接出现异常，正在向服务器确认结果…')
+    setProjectNoticeRetry(false)
+    setCheckingImport(true)
   }
 
   const setProjectArchived = useCallback(async (id, archived) => {
@@ -917,6 +976,7 @@ export default function App() {
           <span className="project-context" title={activeSession?.cwd || activeProject?.cwd || config?.cwd}><Icon.folder />{activeProject?.name || '本地目录'}</span>
         </div>
         {error && <div className="error-banner" role="alert"><span>{error}</span><button aria-label="关闭错误提示" onClick={() => setError('')}>×</button></div>}
+        {projectNotice && <div className="project-notice" role="status"><span>{projectNotice}</span>{projectNoticeRetry && <button className="project-notice-retry" onClick={async () => { if (importCheckBaseline.current.size) { setProjectNoticeRetry(false); setCheckingImport(true) } else if (await loadProjects()) { setProjectNotice('项目列表已更新。'); setProjectNoticeRetry(false) } }}>重新检查</button>}<button aria-label="关闭项目提示" onClick={() => setProjectNotice('')}>×</button></div>}
         <div
           className="messages"
           id="task-panel"
@@ -1287,7 +1347,7 @@ export default function App() {
           </aside>
         </>
       )}
-      {projectDialog && <ProjectDialog project={projectDialog.id ? projectDialog : null} onClose={() => setProjectDialog(null)} onArchive={setProjectArchived} onSaved={async project => { setProjectDialog(null); await loadProjects(); if (!projectDialog.id) selectProject(project.id) }} />}
+      {projectDialog && <ProjectDialog project={projectDialog.id ? projectDialog : null} onClose={() => setProjectDialog(null)} onArchive={setProjectArchived} onSaved={async project => { setProjectDialog(null); await loadProjects(); if (!projectDialog.id) selectProject(project.id) }} onImported={finishProjectImport} onImportUncertain={checkUncertainImport} />}
       {showSettings && (
         <SettingsModal
           config={config}

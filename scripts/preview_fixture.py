@@ -126,6 +126,10 @@ def main():
     parser.add_argument("--port", type=int, default=8012)
     parser.add_argument("--directory", type=Path, default=Path("scratch/workbench-preview"))
     parser.add_argument("--token", help="Optional access token for testing the sign-in gate")
+    parser.add_argument(
+        "--import-delay", type=float, default=0,
+        help="Delay import responses to inspect the completed-upload restore state",
+    )
     args = parser.parse_args()
     root = args.directory.resolve()
     root.mkdir(parents=True, exist_ok=True)
@@ -161,8 +165,17 @@ def main():
             )
 
         asyncio.run(seed())
+    app = create_app(settings, manager, api_token=args.token, store=store)
+    if args.import_delay > 0:
+        @app.middleware("http")
+        async def delay_import_response(request, call_next):
+            response = await call_next(request)
+            if request.url.path == "/api/projects/import" and request.method == "POST":
+                await asyncio.sleep(min(args.import_delay, 30))
+            return response
+
     uvicorn.run(
-        create_app(settings, manager, api_token=args.token, store=store),
+        app,
         host="127.0.0.1",
         port=args.port,
     )

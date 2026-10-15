@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -98,6 +99,25 @@ def test_resume_rejects_metadata_id_mismatch(session_dir: Path) -> None:
         Session.resume(session_dir, session.session_id)
 
     assert not (session_dir / "different-safe-id.jsonl").exists()
+
+
+@pytest.mark.parametrize("bad_meta", [[], {"title": {}}, {"title": "x" * 65}])
+def test_resume_and_listing_reject_invalid_metadata_types(
+    session_dir: Path, bad_meta: object
+) -> None:
+    session = _build_session(session_dir)
+    session.save()
+    lines = session.file_path.read_text(encoding="utf-8").splitlines()
+    if isinstance(bad_meta, dict):
+        original = json.loads(lines[0])
+        original.update(bad_meta)
+        bad_meta = original
+    lines[0] = json.dumps(bad_meta, ensure_ascii=False)
+    session.file_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    with pytest.raises(SessionError, match="元信息损坏"):
+        Session.resume(session_dir, session.session_id)
+    assert Session.list_sessions(session_dir) == []
 
 
 def test_list_sessions_sorted_by_update(session_dir: Path) -> None:

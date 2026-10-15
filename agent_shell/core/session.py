@@ -25,6 +25,39 @@ SESSION_ID_FORMAT = "%Y%m%d-%H%M%S"
 # 会话 ID 白名单：防路径遍历（禁止分隔符与 ".." 前缀）
 _SESSION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
+_META_TEXT_LIMITS = {
+    "title": 64,
+    "created_at": 128,
+    "updated_at": 128,
+    "model": 512,
+    "cwd": 4096,
+    "skill_addon": 2_000_000,
+}
+
+
+def _validated_meta(raw: object, path: Path, fallback_id: str) -> dict:
+    """Validate persisted metadata before it can reach the UI or filesystem APIs."""
+    if not isinstance(raw, dict):
+        raise SessionError(f"会话元信息损坏: {path}: 首行必须是对象")
+    meta = dict(raw)
+    stored_id = meta.get("session_id", fallback_id)
+    if not isinstance(stored_id, str) or not _SESSION_ID_RE.fullmatch(stored_id):
+        raise SessionError(f"会话元信息损坏: {path}: 会话 ID 无效")
+    if stored_id != fallback_id:
+        raise SessionError(f"会话元信息 ID 与文件名不一致: {path}")
+    for field, limit in _META_TEXT_LIMITS.items():
+        value = meta.get(field, "")
+        if not isinstance(value, str) or len(value) > limit:
+            raise SessionError(f"会话元信息损坏: {path}: {field} 无效")
+    if "cwd" in meta and not meta["cwd"]:
+        raise SessionError(f"会话元信息损坏: {path}: cwd 无效")
+    project_id = meta.get("project_id")
+    if project_id is not None and (
+        not isinstance(project_id, str) or not re.fullmatch(r"[0-9a-f]{32}", project_id)
+    ):
+        raise SessionError(f"会话元信息损坏: {path}: project_id 无效")
+    return meta
+
 
 @dataclass
 class SessionMeta:
@@ -299,17 +332,14 @@ class Session:
         try:
             with path.open("r", encoding="utf-8") as fh:
                 lines = [line.strip() for line in fh if line.strip()]
-        except OSError as exc:
+        except (OSError, UnicodeError) as exc:
             raise SessionError(f"无法读取会话文件 {path}: {exc}") from exc
         if not lines:
             raise SessionError(f"会话文件为空: {path}")
         try:
-            meta = json.loads(lines[0])
+            meta = _validated_meta(json.loads(lines[0]), path, session_id)
         except json.JSONDecodeError as exc:
             raise SessionError(f"会话元信息损坏: {path}: {exc}") from exc
-        stored_id = meta.get("session_id", session_id)
-        if stored_id != session_id:
-            raise SessionError(f"会话元信息 ID 与文件名不一致: {path}")
         session = cls(
             session_id,
             session_dir,
@@ -346,7 +376,7 @@ class Session:
             try:
                 with path.open("r", encoding="utf-8") as fh:
                     first = fh.readline().strip()
-                meta = json.loads(first)
+                meta = _validated_meta(json.loads(first), path, path.stem)
                 with path.open("r", encoding="utf-8") as fh:
                     message_count = sum(1 for _ in fh) - 1
                 metas.append(
@@ -361,7 +391,7 @@ class Session:
                         project_id=meta.get("project_id"),
                     )
                 )
-            except (OSError, json.JSONDecodeError):
+            except (OSError, UnicodeError, json.JSONDecodeError, SessionError):
                 continue
         metas.sort(key=lambda m: m.updated_at, reverse=True)
         return metas

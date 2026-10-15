@@ -236,19 +236,26 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px
 .ws-code { padding: 24px; font-size: 11px; line-height: 1.8; }
 .changes-view { overflow: auto; padding: 28px 22px; }
 .studio-muted { font-size: 11px; color: var(--text-mute); line-height: 1.9; }
-.project-dialog { width: min(520px, calc(100vw - 32px)); border: 1px solid var(--line-strong); border-radius: 12px; padding: 28px; color: var(--text); background: var(--panel); box-shadow: var(--shadow-pop); max-height: 90vh; }
+.project-dialog { width: min(520px, calc(100vw - 32px)); max-height: 90vh; overflow-y: auto; border: 1px solid var(--line-strong); border-radius: 12px; padding: 28px; color: var(--text); background: var(--panel); box-shadow: var(--shadow-pop); }
 .project-dialog::backdrop { background: #0008; backdrop-filter: blur(4px); }
 .project-dialog label { display: block; font-size: 11px; color: var(--text); margin-bottom: 16px; }
 .project-dialog input, .project-dialog select { display: block; width: 100%; padding: 9px 11px; border: 1px solid var(--line-strong); border-radius: 5px; background: var(--bg); color: var(--text-hi); margin-top: 7px; font-size: 12px; }
+.project-dialog input[type="file"][hidden] { display: none; }
 .dialog-heading { display: flex; align-items: flex-start; justify-content: space-between; }
+.dialog-heading > button { display: grid; flex-shrink: 0; min-width: 36px; min-height: 36px; place-items: center; margin: -7px -9px 0 8px; font-size: 18px; }
 .dialog-heading h2 { color: var(--text-hi); font-size: 22px; font-weight: 450; margin: 8px 0 0; }
 .dialog-intro { color: var(--text-mute); font-size: 12px; margin: 14px 0 24px; }
+.project-entry-choice { display: grid; grid-template-columns: 1fr 1fr; gap: 3px; padding: 3px; margin: -4px 0 22px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); }
+.project-entry-choice button { min-height: 38px; border: 0; border-radius: 6px; background: transparent; color: var(--text-mute); cursor: pointer; font-size: 11px; }
+.project-entry-choice button[aria-selected="true"] { background: var(--raise); color: var(--text-hi); box-shadow: 0 1px 5px #0002; }
+.project-entry-choice button:focus-visible { outline: 2px solid var(--peach); outline-offset: -2px; }
+.project-entry-choice button:disabled { cursor: default; opacity: .65; }
 .field-note { font-size: 10px; color: var(--text-mute); margin: -7px 0 18px; line-height: 1.8; }
 .directory-choice { display: flex; gap: 3px; padding: 3px; margin: 0 0 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); }
 .directory-choice button { flex: 1; padding: 9px 10px; border: 0; border-radius: 6px; background: transparent; color: var(--text-mute); cursor: pointer; font-size: 11px; }
 .directory-choice button[aria-pressed="true"] { background: var(--raise); color: var(--text-hi); box-shadow: 0 1px 5px #0002; }
 .directory-choice button:focus-visible { outline: 2px solid var(--peach); outline-offset: -2px; }
-.managed-location { display: grid; gap: 7px; padding: 14px 15px; margin: 0 0 18px; border: 1px solid var(--line-strong); border-radius: 8px; background: color-mix(in srgb, var(--sage) 8%, var(--bg)); }
+.managed-location { display: grid; gap: 7px; padding: 14px 15px; margin: 0 0 18px; border: 1px solid var(--line-strong); border-radius: 8px; background: color-mix(in srgb, var(--matcha) 8%, var(--bg)); }
 .managed-location span { color: var(--text-mute); font-size: 10px; }
 .managed-location strong { color: var(--text-hi); font-size: 11px; font-weight: 500; line-height: 1.5; overflow-wrap: anywhere; }
 .managed-location small { color: var(--text-mute); font-size: 10px; line-height: 1.6; }
@@ -256,6 +263,31 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px
 .project-lifecycle strong { color: var(--text-hi); font-size: 11px; font-weight: 550; }
 .project-lifecycle p { margin: 3px 0 0; color: var(--text-mute); font-size: 10px; line-height: 1.6; }
 .project-lifecycle > button { flex-shrink: 0; }
+.project-backup { display: flex; align-items: center; justify-content: space-between; gap: 18px; margin-top: 14px; padding: 14px 0; border-top: 1px solid var(--line); }
+.project-backup-copy { min-width: 0; flex: 1; }
+.project-backup strong { color: var(--text-hi); font-size: 11px; font-weight: 550; }
+.project-backup p { max-width: 340px; margin: 4px 0 0; color: var(--text-mute); font-size: 10px; line-height: 1.65; }
+.project-backup-actions { display: flex; flex-shrink: 0; align-items: center; gap: 6px; }
+.project-backup-actions button { min-height: 36px; border: 1px solid var(--line-strong); border-radius: 5px; padding: 7px 10px; color: var(--text-hi); }
+.project-backup-actions button:disabled { opacity: .5; cursor: default; }
+.project-backup input[type="file"] { display: none; }
+.backup-progress { display: grid; gap: 7px; margin-top: 10px; color: var(--text); font-size: 10px; line-height: 1.5; }
+.backup-progress-track { position: relative; width: min(300px, 100%); height: 4px; overflow: hidden; border-radius: 99px; background: var(--line); }
+.backup-progress-track i { display: block; height: 100%; border-radius: inherit; background: var(--matcha); transition: width .2s ease; }
+.backup-progress-track.indeterminate i { width: 38%; animation: backup-progress 1.25s ease-in-out infinite; }
+.project-backup .backup-notice, .project-import-panel .backup-notice { margin-top: 9px; color: var(--matcha); }
+@keyframes backup-progress { from { transform: translateX(-110%); } to { transform: translateX(300%); } }
+.project-import-panel { display: grid; gap: 16px; }
+.import-privacy { display: flex; align-items: flex-start; gap: 12px; padding: 14px 15px; border: 1px solid color-mix(in srgb, var(--mango) 42%, var(--line)); border-radius: 8px; background: color-mix(in srgb, var(--mango) 8%, var(--bg)); }
+.import-privacy > span { display: grid; flex: 0 0 22px; width: 22px; height: 22px; place-items: center; border: 1px solid color-mix(in srgb, var(--mango) 55%, transparent); border-radius: 50%; color: var(--mango); font: 600 11px var(--font-mono); }
+.import-privacy strong { color: var(--text-hi); font-size: 11px; font-weight: 600; }
+.import-privacy p { margin: 4px 0 0; color: var(--text-mute); font-size: 10px; line-height: 1.7; }
+.import-destination { display: grid; gap: 6px; padding: 15px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); }
+.import-destination span { color: var(--text-mute); font-size: 10px; }
+.import-destination strong { color: var(--text-hi); font: 500 11px/1.5 var(--font-mono); overflow-wrap: anywhere; }
+.import-destination small { color: var(--text-mute); font-size: 10px; line-height: 1.65; }
+.import-actions { display: flex; justify-content: flex-end; gap: 9px; margin-top: 4px; }
+.import-actions button { min-height: 38px; }
 .lifecycle-archive { color: var(--err); }
 .lifecycle-restore { color: var(--peach); }
 .archive-confirm { display: flex; align-items: center; justify-content: space-between; gap: 18px; width: 100%; padding: 12px; border-radius: 6px; background: color-mix(in srgb, var(--err) 9%, transparent); }
@@ -298,6 +330,10 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px
 .error-banner { display: flex; align-items: center; gap: 12px; }
 .error-banner > span { flex: 1; }
 .error-banner > button { border: 0; background: transparent; color: inherit; cursor: pointer; font-size: 17px; line-height: 1; }
+.project-notice { display: flex; align-items: center; gap: 12px; padding: 10px 20px; border-bottom: 1px solid var(--peach-line); background: var(--peach-soft); color: var(--text-hi); font-size: 11px; }
+.project-notice > span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.project-notice > button { flex-shrink: 0; min-width: 32px; min-height: 32px; border: 0; border-radius: 5px; background: transparent; color: inherit; cursor: pointer; font-size: 18px; }
+.project-notice > .project-notice-retry { padding: 4px 8px; border: 1px solid var(--peach-line); font-size: 11px; }
 .prompt-recovery { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; padding: 13px 15px; margin: 14px 0; border: 1px solid color-mix(in srgb, var(--peach) 42%, var(--line)); border-radius: 8px; background: color-mix(in srgb, var(--peach) 7%, var(--panel)); }
 .prompt-recovery > div { min-width: 0; }
 .prompt-recovery strong { color: var(--text-hi); font-size: 11px; font-weight: 600; }
@@ -345,6 +381,13 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px
 @media (max-width: 720px) {
   .composer { padding-bottom: max(12px, env(safe-area-inset-bottom)); }
   .sidebar { padding-left: max(12px, env(safe-area-inset-left)); }
+  .project-dialog { width: calc(100vw - 20px); max-height: calc(100dvh - 20px); padding: 22px 18px 18px; }
+  .project-dialog .dialog-heading h2 { font-size: 20px; }
+  .project-dialog .dialog-heading > button { min-width: 44px; min-height: 44px; }
+  .project-dialog .dialog-intro { margin-bottom: 18px; }
   .project-dialog input, .project-dialog select, .settings-modal input, .settings-modal select, .dropdown-custom input, .composer textarea, .session-edit, .access-card input { font-size: 16px; }
-  .project-lifecycle, .archive-confirm { align-items: flex-start; flex-direction: column; }
+  .project-lifecycle, .archive-confirm, .project-backup { align-items: flex-start; flex-direction: column; }
+  .project-backup-actions { width: 100%; justify-content: flex-end; }
+  .project-backup-actions button, .import-actions button, .dialog-actions button, .project-entry-choice button { min-height: 44px; }
+  .import-actions, .dialog-actions { position: sticky; bottom: -18px; z-index: 2; margin-left: -18px; margin-right: -18px; padding: 12px 18px max(4px, env(safe-area-inset-bottom)); border-top: 1px solid var(--line); background: color-mix(in srgb, var(--panel) 96%, transparent); backdrop-filter: blur(12px); }
 }

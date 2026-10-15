@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import shlex
+import subprocess
 import sys
 from pathlib import Path
 
@@ -77,7 +79,10 @@ def test_bash_does_not_inherit_service_secrets(
         "print(os.getenv('AGENT_WEB_USERS', 'missing'))\n",
         encoding="utf-8",
     )
-    command = "python probe_environment.py"
+    arguments = [sys.executable, "probe_environment.py"]
+    command = (
+        subprocess.list2cmdline(arguments) if sys.platform == "win32" else shlex.join(arguments)
+    )
     result = run_bash(ctx, BashArgs(command=command))
     assert not result.is_error
     assert "must-not-leak" not in result.content

@@ -14,12 +14,13 @@ concurrency:
 
 jobs:
   backend:
-    name: Python ${{ matrix.python-version }}
-    runs-on: ubuntu-latest
+    name: Python ${{ matrix.python-version }} (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         python-version: ['3.10', '3.12']
+        os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -47,6 +48,60 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: npm audit --audit-level=moderate
+
+  browser:
+    name: Studio browser acceptance
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: webui/package-lock.json
+      - run: python -m pip install -e ".[dev]"
+      - run: npm ci
+        working-directory: webui
+      - run: npm run build
+        working-directory: webui
+      - run: npx playwright install --with-deps chromium
+        working-directory: webui
+      - name: Start isolated offline fixture
+        run: |
+          mkdir -p scratch
+          python scripts/preview_fixture.py --port 8012 --import-delay 2 > scratch/preview.log 2>&1 &
+          python scripts/preview_fixture.py --port 8013 --token jelly-preview-token --directory scratch/access-preview > scratch/access-preview.log 2>&1 &
+          python - <<'PY'
+          import time
+          import urllib.request
+          for port in (8012, 8013):
+              for attempt in range(40):
+                  try:
+                      urllib.request.urlopen(f'http://127.0.0.1:{port}/', timeout=2)
+                      break
+                  except OSError:
+                      time.sleep(0.5)
+              else:
+                  raise SystemExit(f'Offline fixture failed to start on {port}')
+          PY
+      - run: node scripts/check_workbench.cjs
+      - run: node scripts/check_project_backup_ui.cjs
+      - run: node scripts/check_access_gate.cjs
+      - name: Preserve browser evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: studio-browser-evidence
+          path: |
+            scratch/screenshots/
+            scratch/preview.log
+            scratch/access-preview.log
+          retention-days: 7
 
   packaging:
     name: Distribution smoke

@@ -21,6 +21,7 @@ cd ..
 | 位置 | 职责 |
 | --- | --- |
 | `agent_shell/server/projects.py` | 用户项目目录与设置的持久化 |
+| `agent_shell/server/project_backup.py` | 完整项目备份、校验与独立导入 |
 | `agent_shell/server/project_routes.py` | 项目 API 与成果发现 |
 | `agent_shell/server/manager.py` | 会话归属、单轮配置、工具目录和恢复权限 |
 | `agent_shell/server/runs.py` | 与浏览器连接解耦的任务生命周期 |
@@ -38,7 +39,7 @@ cd ..
 .venv\Scripts\ruff.exe check agent_shell tests scripts
 ```
 
-`tests/test_projects.py` 使用脚本模型覆盖同名文件在不同项目中的写入、预览与恢复，项目权限、目录不变性、并行任务、会话重载和多用户隔离。测试不请求真实模型。
+`tests/test_projects.py` 使用脚本模型覆盖同名文件在不同项目中的写入、预览与恢复，项目权限、目录不变性、并行任务、会话重载和多用户隔离。`tests/test_project_backup.py` 验证完整项目备份往返、会话元数据与 ZIP 目录预检、路径遍历拒绝、运行中导出保护、失败回滚和异常中断恢复。测试不请求真实模型。
 
 ## 离线界面验收
 
@@ -48,7 +49,7 @@ cd ..
 
 打开 http://127.0.0.1:8012。脚本模型预置「产品探索」项目，生成文档与 CSV；所有数据保存在忽略提交的 `scratch/workbench-preview/`。可用 `--directory` 指定另一个测试目录。服务仅监听本机，不加载真实模型或凭据。
 
-在另一个终端运行浏览器脚本。需要已安装 Playwright 与 Chromium；也可通过环境变量使用现有安装：
+在 `webui` 中运行 `npm ci` 后，执行 `npx playwright install chromium` 安装验收用浏览器；回到仓库根目录运行 `node scripts/check_workbench.cjs`。脚本会自动使用前端开发依赖中的 Playwright，也可通过环境变量使用现有安装：
 
 ```powershell
 $env:JELLY_PLAYWRIGHT = '<Playwright 模块的绝对路径>'
@@ -56,9 +57,11 @@ $env:JELLY_CHROME = '<Chrome 可执行文件的绝对路径>'
 node scripts/check_workbench.cjs
 ```
 
-若 Playwright 可通过 Node 模块解析找到，且已安装对应浏览器，可省略环境变量。`JELLY_PREVIEW_URL` 可覆盖默认地址。脚本只应指向离线测试服务，因为它会创建测试项目与任务。
+`JELLY_PREVIEW_URL` 可覆盖默认地址。脚本只应指向离线测试服务，因为它会创建测试项目与任务。GitHub CI 同时运行 Windows/Linux 后端回归与离线浏览器验收，并保存截图和测试服务日志。
 
-验收包含自动新建项目目录与现有目录入口、提交任务后刷新、启动失败后的输入恢复、成果自动预览、交付包下载、多文件标签、Diff、静态与隔离交互网页预览、项目归档恢复、明暗主题、专注阅读及手机尺寸。截图写入 `scratch/screenshots/`，不提交生成物。
+验收包含自动新建项目目录与现有目录入口、完整项目备份下载与独立导入、提交任务后刷新、启动失败后的输入恢复、成果自动预览、交付包下载、多文件标签、Diff、静态与隔离交互网页预览、项目归档恢复、明暗主题、专注阅读及手机尺寸。截图写入 `scratch/screenshots/`，不提交生成物。
+
+备份传输专项验收：启动预览时加 `--import-delay 2`，再运行 `node scripts/check_project_backup_ui.cjs`。它通过真实网络检查流式文件保存、上传完成后的不可取消阶段、响应断开后的自动核对、上传取消、损坏备份错误态，以及 360×800 明暗主题布局；不会使用真实项目或凭据。
 
 访问口令流程可用独立端口验证：
 
