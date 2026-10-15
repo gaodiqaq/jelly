@@ -1,0 +1,206 @@
+/* Readable forms and quiet menus. Load after the workbench surface styles. */
+.settings-modal,
+.project-dialog,
+.access-card {
+  font-size: var(--text-ui, 14px);
+  line-height: 1.6;
+  border-radius: 18px;
+  box-shadow: 0 24px 80px #0002, 0 4px 16px #0001;
+}
+
+.modal-overlay { z-index: 200; padding: 24px; }
+.settings-modal {
+  width: 600px;
+  max-width: 100%;
+  max-height: calc(100dvh - 48px);
+  padding: 30px;
+  scrollbar-gutter: stable;
+}
+.settings-modal .modal-head { gap: 16px; margin-bottom: 28px; }
+.settings-modal .modal-title { gap: 10px; font-size: 21px; font-weight: 600; letter-spacing: -.4px; }
+.settings-modal .modal-title svg { width: 20px; height: 20px; color: var(--text-mute); }
+.settings-modal .modal-close {
+  display: grid;
+  flex: 0 0 40px;
+  width: 40px;
+  height: 40px;
+  place-items: center;
+  border: 1px solid transparent;
+}
+.settings-modal .modal-close svg { width: 18px; height: 18px; }
+.settings-modal .modal-close:hover { background: var(--raise); color: var(--text-hi); }
+.settings-modal .modal-section { margin-bottom: 26px; }
+.settings-modal .field-label {
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 10px;
+  font-size: var(--text-ui, 14px);
+  line-height: 1.6;
+  font-weight: 550;
+}
+.settings-modal .field-hint { font-size: var(--text-sm, 13px); line-height: 1.75; }
+.settings-modal .field-input,
+.settings-modal .add-provider-form input {
+  min-height: 46px;
+  margin-bottom: 10px;
+  padding: 11px 13px;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  background: var(--bg);
+  font: var(--text-base, 16px)/1.5 var(--font-ui);
+  color: var(--text-hi);
+}
+.settings-modal .field-input:focus,
+.settings-modal .add-provider-form input:focus,
+.project-dialog input:focus,
+.project-dialog select:focus,
+.access-card input:focus,
+.dropdown-custom input:focus {
+  background: var(--bg);
+  border-color: var(--peach);
+  outline: 3px solid color-mix(in srgb, var(--peach) 12%, transparent);
+  outline-offset: 0;
+}
+.settings-modal .provider-row,
+.settings-modal .add-provider-form { padding: 18px; margin: 12px 0; border-radius: 12px; background: var(--bg); }
+.settings-modal .provider-row-head { flex-wrap: wrap; gap: 8px 12px; margin-bottom: 14px; }
+.settings-modal .provider-name { font-size: 15px; font-weight: 600; overflow-wrap: anywhere; }
+.settings-modal .provider-meta { margin-left: auto; font-size: var(--text-xs, 12px); line-height: 1.6; overflow-wrap: anywhere; }
+.settings-modal .btn-remove-provider { display: grid; width: 34px; height: 34px; padding: 8px; place-items: center; }
+.settings-modal .btn-remove-provider svg { width: 16px; height: 16px; }
+.settings-modal .btn-add-provider { min-height: 38px; padding: 8px 12px; font-size: var(--text-ui, 14px); border-style: solid; border-color: var(--line-strong); color: var(--text); font-weight: 500; }
+.settings-modal .btn { min-height: 44px; padding: 11px 18px; font-size: var(--text-ui, 14px); line-height: 1.45; border-radius: 9px; font-weight: 550; }
+.settings-modal .btn.primary { background: var(--peach); color: var(--ink-on-peach); }
+.settings-modal .btn.plain { border: 1px solid var(--line); background: var(--panel); }
+.settings-modal .btn.plain:hover { background: var(--raise); }
+.settings-modal .modal-actions { flex-wrap: wrap; gap: 10px; margin-top: 28px; padding-top: 22px; border-top: 1px solid var(--line); }
+.settings-modal .test-result,
+.settings-modal .settings-error { font-size: var(--text-ui, 14px); line-height: 1.75; padding: 13px 15px; overflow-wrap: anywhere; word-break: normal; }
+
+.project-dialog {
+  width: min(580px, calc(100vw - 48px));
+  max-height: calc(100dvh - 48px);
+  overflow-y: auto;
+  padding: 30px;
+  scrollbar-gutter: stable;
+}
+.project-dialog .dialog-heading { gap: 14px; }
+.project-dialog .eyebrow { font-size: var(--text-xs, 12px); letter-spacing: 1.1px; line-height: 1.6; }
+.project-dialog .dialog-heading h2 { font-size: 27px; line-height: 1.35; font-weight: 550; letter-spacing: -.6px; margin-top: 10px; }
+.project-dialog .dialog-heading > button { min-width: 40px; min-height: 40px; margin: -6px -7px 0 0; font-size: 24px; }
+.project-dialog .dialog-intro { margin: 16px 0 26px; font-size: var(--text-ui, 14px); line-height: 1.8; }
+.project-dialog label { margin-bottom: 22px; font-size: var(--text-ui, 14px); font-weight: 550; line-height: 1.6; }
+.project-dialog input,
+.project-dialog select {
+  min-width: 0;
+  min-height: 46px;
+  margin-top: 9px;
+  padding: 11px 13px;
+  border-radius: 10px;
+  font: var(--text-base, 16px)/1.5 var(--font-ui);
+}
+.project-dialog input:disabled { opacity: .75; }
+.project-dialog .project-entry-choice { gap: 4px; padding: 4px; margin-bottom: 26px; border-radius: 11px; }
+.project-dialog .project-entry-choice button { min-height: 42px; font-size: var(--text-ui, 14px); border-radius: 8px; }
+.project-dialog .directory-choice { gap: 4px; padding: 4px; margin-bottom: 16px; border-radius: 11px; }
+.project-dialog .directory-choice button { min-height: 42px; padding: 10px 12px; font-size: var(--text-ui, 14px); border-radius: 8px; }
+.project-dialog .field-note { margin: -10px 0 22px; font-size: var(--text-sm, 13px); line-height: 1.75; }
+.project-dialog .managed-location,
+.project-dialog .import-destination { gap: 8px; padding: 18px; margin-bottom: 22px; border-radius: 11px; }
+.project-dialog .managed-location span,
+.project-dialog .import-destination span { font-size: var(--text-sm, 13px); }
+.project-dialog .managed-location strong,
+.project-dialog .import-destination strong { font: 500 var(--text-ui, 14px)/1.7 var(--font-mono); }
+.project-dialog .managed-location small,
+.project-dialog .import-destination small { font-size: var(--text-sm, 13px); line-height: 1.75; }
+.project-dialog .project-lifecycle { gap: 20px; margin-top: 26px; padding: 20px 0; }
+.project-dialog .project-lifecycle strong,
+.project-dialog .project-backup strong,
+.project-dialog .import-privacy strong { font-size: var(--text-ui, 14px); font-weight: 600; }
+.project-dialog .project-lifecycle p,
+.project-dialog .project-backup p,
+.project-dialog .import-privacy p { margin-top: 7px; font-size: var(--text-sm, 13px); line-height: 1.8; }
+.project-dialog .project-backup { flex-direction: column; align-items: stretch; gap: 15px; padding: 20px 0 0; margin-top: 20px; }
+.project-dialog .project-backup p { max-width: none; }
+.project-dialog .project-backup-actions { flex-wrap: wrap; justify-content: flex-end; gap: 10px; }
+.project-dialog .quiet-button,
+.project-dialog .solid-button,
+.project-dialog .archive-button { min-height: 42px; padding: 10px 15px; font-size: var(--text-ui, 14px); line-height: 1.5; border-radius: 9px; }
+.project-dialog .archive-confirm { gap: 14px; padding: 16px; border-radius: 10px; }
+.project-dialog .archive-confirm > div:last-child { gap: 8px; }
+.project-dialog .dialog-actions { flex-wrap: wrap; gap: 10px; margin-top: 28px; padding-top: 22px; border-top: 1px solid var(--line); }
+.project-dialog .backup-progress { gap: 9px; margin-top: 14px; font-size: var(--text-sm, 13px); line-height: 1.7; }
+.project-dialog .backup-progress-track { width: 100%; height: 5px; }
+.project-dialog .backup-notice,
+.project-dialog .form-error { font-size: var(--text-ui, 14px); line-height: 1.75; overflow-wrap: anywhere; }
+.project-dialog .project-import-panel { gap: 20px; }
+.project-dialog .import-privacy { gap: 13px; padding: 18px; border-radius: 11px; }
+.project-dialog .import-privacy > span { flex-basis: 25px; width: 25px; height: 25px; font-size: var(--text-sm, 13px); }
+.project-dialog .import-destination { margin: 0; }
+.project-dialog .import-actions { flex-wrap: wrap; gap: 10px; margin-top: 4px; }
+
+.access-card { width: min(460px, 100%); padding: 40px; }
+.access-card .eyebrow { font-size: var(--text-xs, 12px); letter-spacing: 1.2px; }
+.access-card h1 { margin: 15px 0 12px; font: 550 30px/1.35 var(--font-ui); letter-spacing: -.7px; }
+.access-card > p { margin-bottom: 28px; font-size: var(--text-ui, 14px); line-height: 1.8; }
+.access-card label { gap: 9px; margin-bottom: 20px; font-size: var(--text-ui, 14px); color: var(--text); }
+.access-card input { min-height: 48px; padding: 12px 14px; border-radius: 10px; font: var(--text-base, 16px)/1.5 var(--font-ui); }
+.access-card .solid-button { min-height: 46px; padding: 11px 16px; border-radius: 10px; font-size: var(--text-ui, 14px); }
+.access-card .form-error { margin: 0 0 16px; font-size: var(--text-ui, 14px); line-height: 1.7; }
+
+.model-dropdown,
+.perm-popup,
+.skill-popup { padding: 8px; border-radius: 14px; overscroll-behavior: contain; box-shadow: 0 14px 48px #0002, 0 2px 8px #0001; }
+.model-dropdown { width: min(360px, calc(100vw - 32px)); max-height: min(520px, 60dvh); }
+.model-dropdown .dropdown-group { margin-bottom: 12px; }
+.model-dropdown .dropdown-group-label { padding: 9px 10px 7px; font-size: var(--text-xs, 12px); font-weight: 600; letter-spacing: .7px; }
+.model-dropdown .dropdown-item { min-height: 43px; gap: 12px; padding: 10px 12px; font-size: 15px; line-height: 1.5; border-radius: 8px; }
+.model-dropdown .dropdown-item:hover { background: var(--raise); }
+.model-dropdown .dropdown-item .item-model { min-width: 0; }
+.model-dropdown .dropdown-empty { padding: 22px 16px; font-size: var(--text-ui, 14px); line-height: 1.7; }
+.model-dropdown .dropdown-empty-small { padding: 6px 10px; font-size: var(--text-sm, 13px); line-height: 1.6; font-style: normal; }
+.model-dropdown .dropdown-custom { padding: 6px 8px 2px; }
+.model-dropdown .dropdown-custom input { min-height: 44px; padding: 10px 12px; font: var(--text-base, 16px)/1.5 var(--font-ui); }
+.model-dropdown .dropdown-footer { padding-top: 8px; margin-top: 8px; }
+.model-dropdown .dropdown-footer button { min-height: 42px; padding: 10px; font-size: var(--text-ui, 14px); font-weight: 500; }
+.perm-popup { width: min(320px, calc(100vw - 32px)); max-height: 60dvh; overflow-y: auto; }
+.perm-popup .perm-option { gap: 12px; padding: 13px 12px; border-radius: 9px; }
+.perm-popup .perm-option:hover { background: var(--raise); }
+.perm-popup .perm-option-icon { margin-top: 3px; }
+.perm-popup .perm-option-icon svg { width: 17px; height: 17px; }
+.perm-popup .perm-option-text { gap: 5px; }
+.perm-popup .perm-option-label { font-size: 15px; line-height: 1.5; font-weight: 550; }
+.perm-popup .perm-option-desc { font-size: var(--text-sm, 13px); line-height: 1.65; }
+.perm-popup .perm-option-check svg { width: 16px; height: 16px; }
+.skill-popup { width: min(344px, calc(100vw - 32px)); min-width: 0; max-width: none; max-height: min(450px, 55dvh); }
+.skill-popup .skill-item { width: 100%; min-height: 44px; gap: 5px; padding: 12px; border: 0; background: transparent; color: var(--text); text-align: left; border-radius: 9px; }
+.skill-popup .skill-item:hover { background: var(--raise); }
+.skill-popup .skill-item-name { font: 550 15px/1.5 var(--font-ui); overflow-wrap: anywhere; }
+.skill-popup .skill-item-desc { font-size: var(--text-sm, 13px); line-height: 1.7; overflow-wrap: anywhere; }
+
+@media (max-width: 640px) {
+  .modal-overlay { padding: 12px; }
+  .settings-modal { padding: 24px 20px; max-height: calc(100dvh - 24px); border-radius: 15px; }
+  .settings-modal .modal-title { font-size: 20px; }
+  .settings-modal .provider-row,
+  .settings-modal .add-provider-form { padding: 15px; }
+  .settings-modal .provider-meta { margin-left: 0; }
+  .settings-modal .btn-remove-provider { margin-left: auto; }
+  .settings-modal .modal-actions .btn { flex: 1 1 auto; }
+  .project-dialog { width: calc(100vw - 24px); max-height: calc(100dvh - 24px); padding: 25px 20px 20px; border-radius: 15px; }
+  .project-dialog .dialog-heading h2 { font-size: 25px; }
+  .project-dialog .dialog-heading > button { min-width: 44px; min-height: 44px; }
+  .project-dialog .project-lifecycle,
+  .project-dialog .archive-confirm { flex-direction: column; align-items: stretch; gap: 14px; }
+  .project-dialog .project-lifecycle > button { align-self: flex-start; }
+  .project-dialog .archive-confirm > div:last-child { justify-content: flex-end; flex-wrap: wrap; }
+  .project-dialog .dialog-actions,
+  .project-dialog .import-actions { gap: 9px; }
+  .project-dialog .quiet-button,
+  .project-dialog .solid-button,
+  .project-dialog .archive-button { min-height: 44px; }
+  .access-card { padding: 30px 24px; }
+  .model-dropdown,
+  .perm-popup,
+  .skill-popup { position: fixed; left: 16px; right: 16px; bottom: calc(132px + env(safe-area-inset-bottom)); top: auto; width: auto; max-width: none; max-height: 55dvh; }
+}

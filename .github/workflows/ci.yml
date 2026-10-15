@@ -91,6 +91,7 @@ jobs:
           PY
       - run: node scripts/check_workbench.cjs
       - run: node scripts/check_project_backup_ui.cjs
+      - run: node scripts/check_readability.cjs
       - run: node scripts/check_access_gate.cjs
       - name: Preserve browser evidence
         if: always()

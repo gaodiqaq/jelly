@@ -5,6 +5,7 @@ import ErrorBoundary from './ErrorBoundary'
 import './styles.css'
 import './studio.css'
 import './workbench.css'
+import './dialogs.css'
 
 createRoot(document.getElementById('root')).render(
   <ErrorBoundary><App /></ErrorBoundary>,

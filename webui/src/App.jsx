@@ -197,6 +197,7 @@ export default function App() {
   useEffect(() => {
     document.documentElement.dataset.theme = theme
     localStorage.setItem('jelly_theme', theme)
+    document.querySelector('meta[name="theme-color"]')?.setAttribute('content', theme === 'light' ? '#faf9f6' : '#20221f')
   }, [theme])
   const [sessions, setSessions] = useState([])
   const [sessionsLoaded, setSessionsLoaded] = useState(false)
@@ -248,7 +249,7 @@ export default function App() {
   const [permMode, setPermMode] = useState('ask')
   const [showPermMenu, setShowPermMenu] = useState(false)
   const [pendingApproval, setPendingApproval] = useState(null)
-  const [wsOpen, setWsOpen] = useState(() => localStorage.getItem('jelly_ws_open') === '1' || (localStorage.getItem('jelly_ws_open') === null && window.innerWidth > 1100))
+  const [wsOpen, setWsOpen] = useState(() => localStorage.getItem('jelly_ws_open') === '1' || (localStorage.getItem('jelly_ws_open') === null && window.innerWidth >= 1280))
   const [wsWidth, setWsWidth] = useState(() => Number(localStorage.getItem('jelly_ws_width')) || 480)
   const [wsFile, setWsFile] = useState(null)
   const messagesRef = useRef(null)
@@ -885,6 +886,7 @@ export default function App() {
             </span>
           </div>
         </div>
+        <div className="sidebar-scroll">
         <button className={`workspace-selector${projectArchived ? ' archived' : ''}${activeProject?.available === false ? ' unavailable' : ''}`} onClick={() => activeProject ? setProjectDialog(activeProject) : setProjectDialog({})}>
           <span className="workspace-monogram">{(activeProject?.name || 'J').slice(0, 1)}</span><span>{activeProject?.name || '我的工作空间'}</span>{projectArchived ? <small>已归档</small> : activeProject?.available === false ? <small>目录不可用</small> : null}<Icon.chevron />
         </button>
@@ -925,6 +927,7 @@ export default function App() {
           ))}
         </ul>
         {visibleSessions.length === 0 && <div className="empty-sessions">这里还没有任务<br />从一个想法开始。</div>}
+        </div>
         <div className="sidebar-bottom"><span className="sidebar-status"><i /> 本地工作空间</span><button onClick={() => setShowSettings(true)}><Icon.gear /> 设置与连接</button></div>
       </aside>
       <button type="button" className="nav-backdrop" aria-label="关闭项目与任务导航" onClick={() => { setNavOpen(false); requestAnimationFrame(() => document.querySelector('.menu-btn')?.focus()) }} />

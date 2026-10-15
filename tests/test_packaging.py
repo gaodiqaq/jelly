@@ -11,11 +11,15 @@ import zipfile
 from pathlib import Path
 
 import pytest
+from fastapi.testclient import TestClient
 
+from agent_shell.config import Settings
+from agent_shell.runtime import ProviderStore
 from agent_shell.server import app as app_module
 
 ROOT = Path(__file__).resolve().parents[1]
 PACKAGE_SMOKE_ENV = "JELLY_RUN_PACKAGE_SMOKE"
+THEME_RESOURCES = ("theme.js", "fonts/InterVariable.woff2", "fonts/Inter-LICENSE.txt")
 
 
 def _run(command: list[str], *, cwd: Path, env: dict[str, str] | None = None) -> None:
@@ -35,9 +39,26 @@ def _run(command: list[str], *, cwd: Path, env: dict[str, str] | None = None) ->
     )
 
 
+def _assert_theme_resources(resources: dict[str, bytes]) -> None:
+    theme = resources["theme.js"].decode("utf-8")
+    assert "jelly_theme" in theme
+    assert "document.documentElement.dataset.theme" in theme
+    assert "'light'" in theme and "'dark'" in theme
+    font = resources["fonts/InterVariable.woff2"]
+    assert font[:4] == b"wOF2"
+    assert len(font) > 1000
+    license_text = resources["fonts/Inter-LICENSE.txt"].decode("utf-8")
+    assert "The Inter Project Authors" in license_text
+    assert "SIL OPEN FONT LICENSE Version 1.1" in license_text
+
+
 def _assert_wheel_has_webui(wheel: Path) -> None:
     with zipfile.ZipFile(wheel) as archive:
         names = set(archive.namelist())
+        resources = {
+            resource: archive.read(f"agent_shell/webui/{resource}") for resource in THEME_RESOURCES
+        }
+    _assert_theme_resources(resources)
     assert "agent_shell/webui/index.html" in names
     assert "agent_shell/webui/favicon.svg" in names
     assert any(
@@ -65,6 +86,28 @@ def test_find_dist_dir_prefers_package_then_source(
     assert app_module._find_dist_dir() == packaged_ui
     (packaged_ui / "index.html").unlink()
     assert app_module._find_dist_dir() == source_ui
+
+
+def test_bundled_theme_and_font_are_served(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Public appearance resources must load even when the API is protected."""
+    monkeypatch.setattr(app_module, "_find_dist_dir", lambda: ROOT / "webui" / "dist")
+    settings = Settings(cwd=tmp_path, session_dir=tmp_path / "sessions")
+    store = ProviderStore(tmp_path / "runtime.yaml")
+    with TestClient(app_module.create_app(settings, api_token="test-token", store=store)) as client:
+        index = client.get("/")
+        assert index.status_code == 200
+        assert 'src="/theme.js"' in index.text
+        assert index.text.index('src="/theme.js"') < index.text.index('src="/assets/')
+        resources = {}
+        for resource in THEME_RESOURCES:
+            response = client.get(f"/{resource}")
+            assert response.status_code == 200, resource
+            assert response.headers["x-content-type-options"] == "nosniff"
+            assert "text/html" not in response.headers["content-type"]
+            resources[resource] = response.content
+        _assert_theme_resources(resources)
 
 
 @pytest.mark.skipif(
@@ -97,7 +140,16 @@ def test_sdist_builds_installable_wheel_with_webui(tmp_path: Path) -> None:
     sdist = next(direct_dist.glob("*.tar.gz"))
     _assert_wheel_has_webui(direct_wheel)
     with tarfile.open(sdist, "r:gz") as archive:
-        assert any(name.endswith("/webui/dist/index.html") for name in archive.getnames())
+        members = archive.getnames()
+        assert any(name.endswith("/webui/dist/index.html") for name in members)
+        resources = {}
+        for resource in THEME_RESOURCES:
+            matches = [name for name in members if name.endswith(f"/webui/dist/{resource}")]
+            assert len(matches) == 1, resource
+            stream = archive.extractfile(matches[0])
+            assert stream is not None
+            resources[resource] = stream.read()
+        _assert_theme_resources(resources)
 
     extracted = tmp_path / "sdist-source"
     shutil.unpack_archive(str(sdist), extracted)
@@ -151,12 +203,26 @@ with TestClient(create_app(settings, api_token=None, store=store)) as client:
     assert response.headers["cache-control"] == "no-cache"
     assert "frame-ancestors 'none'" in response.headers["content-security-policy"]
     assert 'id="root"' in response.text
-    script = re.search(r'<script[^>]+src="([^"]+\\.js)"', response.text)
+    assert 'src="/theme.js"' in response.text
+    script = re.search(r'<script[^>]+src="(/assets/[^"]+\\.js)"', response.text)
     assert script, response.text
     asset = client.get(script.group(1))
     assert asset.status_code == 200
     assert "immutable" in asset.headers["cache-control"]
     assert len(asset.content) > 1000
+    theme = client.get("/theme.js")
+    assert theme.status_code == 200
+    assert "javascript" in theme.headers["content-type"]
+    assert "jelly_theme" in theme.text
+    assert "document.documentElement.dataset.theme" in theme.text
+    font = client.get("/fonts/InterVariable.woff2")
+    assert font.status_code == 200
+    assert font.content[:4] == b"wOF2"
+    assert len(font.content) > 1000
+    license_response = client.get("/fonts/Inter-LICENSE.txt")
+    assert license_response.status_code == 200
+    assert "The Inter Project Authors" in license_response.text
+    assert "SIL OPEN FONT LICENSE Version 1.1" in license_response.text
 """
     env = os.environ.copy()
     env["PYTHONPATH"] = str(site)

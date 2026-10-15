@@ -27,6 +27,10 @@ const ChevronIcon = () => (
 const IMAGE_RE = /\.(png|jpe?g|gif|webp|svg|bmp|ico)$/i
 const MD_RE = /\.(md|markdown)$/i
 
+function outlineLabel(heading) {
+  return heading.replace(/^#+\s+/, '').replace(/^\d{1,3}(?:\.\d{1,3})*(?:[.、．)]\s*|\s+)/, '')
+}
+
 // ---------- 文件树 ----------
 
 function FileTree({ onOpenFile, activeFile, scope }) {
@@ -232,7 +236,7 @@ function Preview({ path, onBack, onOpenFile, scope, revision, artifact }) {
   } else if (isMd) {
     body = <div className="document-sheet" ref={documentRef}><div className="document-kicker">JELLY DOCUMENT <span>{artifact ? `v${artifact.version}` : '本地文件'}</span></div>
       {introduction && <Markdown text={introduction} onOpenFile={onOpenFile} />}
-      {headings.length > 2 && <details className="document-outline" open><summary>目录 <span>CONTENTS</span></summary>{headings.map((heading, i) => <button key={i} onClick={() => documentRef.current?.querySelectorAll('.markdown h2, .markdown h3')[i]?.scrollIntoView({ behavior: 'smooth', block: 'start' })}><span>{String(i + 1).padStart(2, '0')}</span>{heading.replace(/^#+ /, '')}</button>)}</details>}
+      {headings.length > 2 && <details className="document-outline" open><summary>目录 <span>CONTENTS</span></summary>{headings.map((heading, i) => <button key={i} onClick={() => documentRef.current?.querySelectorAll('.markdown h2, .markdown h3')[i]?.scrollIntoView({ behavior: 'smooth', block: 'start' })}><span>{String(i + 1).padStart(2, '0')}</span>{outlineLabel(heading)}</button>)}</details>}
       <Markdown text={documentBody} onOpenFile={onOpenFile} />
     </div>
   } else {

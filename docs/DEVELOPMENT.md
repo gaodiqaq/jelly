@@ -31,6 +31,8 @@ cd ..
 | `webui/src/Artifacts.jsx`、`useArtifacts.js` | 成果卡片与按任务刷新的文件列表 |
 | `webui/src/Workspace.jsx` | 文件标签、预览、阅读目录和专注模式 |
 | `webui/src/workbench.css` | 工作台布局、主题和响应式排版 |
+| `webui/src/dialogs.css` | 设置、项目表单与输入区菜单排版 |
+| `webui/public/fonts/` | 自托管 Inter 可变字体与 SIL OFL 许可证 |
 
 ## 自动测试
 
@@ -62,6 +64,15 @@ node scripts/check_workbench.cjs
 验收包含自动新建项目目录与现有目录入口、完整项目备份下载与独立导入、提交任务后刷新、启动失败后的输入恢复、成果自动预览、交付包下载、多文件标签、Diff、静态与隔离交互网页预览、项目归档恢复、明暗主题、专注阅读及手机尺寸。截图写入 `scratch/screenshots/`，不提交生成物。
 
 备份传输专项验收：启动预览时加 `--import-delay 2`，再运行 `node scripts/check_project_backup_ui.cjs`。它通过真实网络检查流式文件保存、上传完成后的不可取消阶段、响应断开后的自动核对、上传取消、损坏备份错误态，以及 360×800 明暗主题布局；不会使用真实项目或凭据。
+
+可读性专项验收：运行 `node scripts/check_readability.cjs`。脚本仅接受 8012 端口的预置离线任务，检查 1440、1280、1080、390、360、900×600 和 720×450（1440×900 浏览器放大 200% 的等效 CSS 视口）。检查正文、输入与导航的实际字号，打开模型 / 权限 / Skill 菜单验证边界，滚动检查表单控件遮挡，并记录浏览器实际使用的字体。报告和截图保存在 `scratch/screenshots/readability-*`；同样纳入 CI。
+
+字体由 `webui/public/fonts/InterVariable.woff2` 提供，来源为 [Inter 官方仓库](https://github.com/rsms/inter)，其 SIL OFL 许可证随源码与发布包保留。中文依靠系统无衬线字体，不下载外部字体。新增静态资源后应运行发布包冒烟测试，确保 wheel 和源码包能完整提供字体、主题初始化脚本与页面资源：
+
+```powershell
+$env:JELLY_RUN_PACKAGE_SMOKE = '1'
+.venv\Scripts\python.exe -m pytest tests/test_packaging.py -q -o addopts=
+```
 
 访问口令流程可用独立端口验证：
 
