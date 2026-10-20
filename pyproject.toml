@@ -27,7 +27,7 @@ dependencies = [
     "uvicorn>=0.30.0",
     "websockets>=12.0",
     # Minimum safe versions of the HTTP dependencies used by LiteLLM.
-    "multidict>=6.9.1,<7",
+    "multidict>=6.9.1,<8",
     "urllib3>=2.8.0,<3",
 ]
 
