@@ -19,7 +19,11 @@ from agent_shell.server import app as app_module
 
 ROOT = Path(__file__).resolve().parents[1]
 PACKAGE_SMOKE_ENV = "JELLY_RUN_PACKAGE_SMOKE"
-THEME_RESOURCES = ("theme.js", "fonts/InterVariable.woff2", "fonts/Inter-LICENSE.txt")
+THEME_RESOURCES = (
+    "theme.js",
+    "fonts/SourceHanSansSC-VF.woff2",
+    "fonts/SourceHanSans-LICENSE.txt",
+)
 
 
 def _run(command: list[str], *, cwd: Path, env: dict[str, str] | None = None) -> None:
@@ -44,11 +48,11 @@ def _assert_theme_resources(resources: dict[str, bytes]) -> None:
     assert "jelly_theme" in theme
     assert "document.documentElement.dataset.theme" in theme
     assert "'light'" in theme and "'dark'" in theme
-    font = resources["fonts/InterVariable.woff2"]
+    font = resources["fonts/SourceHanSansSC-VF.woff2"]
     assert font[:4] == b"wOF2"
     assert len(font) > 1000
-    license_text = resources["fonts/Inter-LICENSE.txt"].decode("utf-8")
-    assert "The Inter Project Authors" in license_text
+    license_text = resources["fonts/SourceHanSans-LICENSE.txt"].decode("utf-8")
+    assert "Adobe" in license_text
     assert "SIL OPEN FONT LICENSE Version 1.1" in license_text
 
 
@@ -215,13 +219,13 @@ with TestClient(create_app(settings, api_token=None, store=store)) as client:
     assert "javascript" in theme.headers["content-type"]
     assert "jelly_theme" in theme.text
     assert "document.documentElement.dataset.theme" in theme.text
-    font = client.get("/fonts/InterVariable.woff2")
+    font = client.get("/fonts/SourceHanSansSC-VF.woff2")
     assert font.status_code == 200
     assert font.content[:4] == b"wOF2"
     assert len(font.content) > 1000
-    license_response = client.get("/fonts/Inter-LICENSE.txt")
+    license_response = client.get("/fonts/SourceHanSans-LICENSE.txt")
     assert license_response.status_code == 200
-    assert "The Inter Project Authors" in license_response.text
+    assert "Adobe" in license_response.text
     assert "SIL OPEN FONT LICENSE Version 1.1" in license_response.text
 """
     env = os.environ.copy()

@@ -1,16 +1,16 @@
 /* Jelly Studio: readable conversation, quiet chrome, and a generous artifact canvas. */
 @font-face {
-  font-family: 'Inter';
+  font-family: 'Source Han Sans SC';
   font-style: normal;
-  font-weight: 100 900;
+  font-weight: 250 900;
   font-display: swap;
-  src: url('/fonts/InterVariable.woff2') format('woff2');
+  src: url('/fonts/SourceHanSansSC-VF.woff2') format('woff2');
 }
 
 :root {
   color-scheme: light;
-  --font-ui: 'Inter', 'Segoe UI Variable Text', 'Segoe UI', 'PingFang SC', 'Microsoft YaHei UI', 'Microsoft YaHei', sans-serif;
-  --font-mono: 'Cascadia Code', 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
+  --font-ui: 'Source Han Sans SC', 'Source Han Sans CN', 'Noto Sans CJK SC', 'Microsoft YaHei UI', sans-serif;
+  --font-mono: 'Cascadia Code', 'SFMono-Regular', Consolas, 'Liberation Mono', 'Source Han Sans SC', monospace;
   --text-xs: .75rem; --text-sm: .8125rem; --text-ui: .875rem;
   --text-base: 1rem; --text-reading: 1.0625rem;
   --bg: #faf9f6; --bg-deep: #f1f0ec; --panel: #ffffff; --raise: #eaece6;
@@ -262,8 +262,8 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px
 .web-preview-safety button { flex-shrink: 0; padding: 4px 8px; border: 1px solid var(--line-strong); border-radius: 4px; background: var(--panel); color: var(--text-hi); cursor: pointer; font-size: var(--text-xs); }
 .workspace-artifacts { padding: 22px 20px 0; }
 .preview-welcome { padding: 36px 24px 24px; text-align: center; color: var(--text-mute); }
-.preview-orbit { display: inline-block; font: 32px Georgia, serif; color: var(--peach); padding: 18px 0 6px; }
-.preview-welcome h3 { font: 20px Georgia, 'Songti SC', SimSun, serif; font-weight: 400; color: var(--text-hi); }
+.preview-orbit { display: inline-block; font: 32px var(--font-ui); color: var(--peach); padding: 18px 0 6px; }
+.preview-welcome h3 { font: 20px var(--font-ui); font-weight: 400; color: var(--text-hi); }
 .preview-welcome p { font-size: var(--text-sm); line-height: 1.9; }
 .ws-tree-root { font-size: var(--text-sm); padding: 14px 20px; }
 .ws-tree-error button { margin-left: 8px; padding: 2px 7px; border: 1px solid var(--line-strong); border-radius: 4px; background: transparent; color: var(--text); cursor: pointer; }
@@ -419,7 +419,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px
 .onboarding-card li small { color: var(--text-mute); font-size: var(--text-xs); }
 .onboarding-actions, .fatal-actions { display: flex; flex-wrap: wrap; gap: 10px; }
 .fatal-screen { min-height: 100%; display: grid; place-content: center; justify-items: start; padding: 32px; background: var(--bg); color: var(--text); }
-.fatal-screen h1 { margin: 12px 0 8px; color: var(--text-hi); font: 400 clamp(25px, 4vw, 38px)/1.3 Georgia, 'Songti SC', serif; }
+.fatal-screen h1 { margin: 12px 0 8px; color: var(--text-hi); font: 400 clamp(25px, 4vw, 38px)/1.3 var(--font-ui); }
 .fatal-screen p { max-width: 480px; margin: 0 0 24px; color: var(--text-mute); }
 .fatal-cube { width: 38px; height: 38px; margin-bottom: 22px; }
 .fatal-screen details { max-width: 600px; margin-top: 24px; color: var(--text-faint); font-size: var(--text-xs); }
@@ -427,7 +427,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px
 .access-gate { position: fixed; inset: 0; z-index: 300; display: grid; place-items: center; padding: 24px; background: color-mix(in srgb, var(--bg) 92%, transparent); backdrop-filter: blur(18px); }
 .access-card { width: min(410px, 100%); padding: 38px; border: 1px solid var(--line-strong); border-radius: 12px; background: var(--panel); box-shadow: var(--shadow-pop); }
 .access-cube { display: block; width: 34px; height: 34px; margin-bottom: 22px; }
-.access-card h1 { margin: 9px 0; color: var(--text-hi); font: 400 27px/1.4 Georgia, 'Songti SC', serif; }
+.access-card h1 { margin: 9px 0; color: var(--text-hi); font: 400 27px/1.4 var(--font-ui); }
 .access-card > p { margin: 0 0 24px; color: var(--text-mute); font-size: var(--text-sm); line-height: 1.8; }
 .access-card label { display: grid; gap: 7px; margin-bottom: 14px; color: var(--text-mute); font-size: var(--text-xs); }
 .access-card input { width: 100%; padding: 11px 12px; border: 1px solid var(--line-strong); border-radius: 6px; background: var(--bg); color: var(--text-hi); }

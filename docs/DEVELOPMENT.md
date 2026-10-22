@@ -32,7 +32,7 @@ cd ..
 | `webui/src/Workspace.jsx` | 文件标签、预览、阅读目录和专注模式 |
 | `webui/src/workbench.css` | 工作台布局、主题和响应式排版 |
 | `webui/src/dialogs.css` | 设置、项目表单与输入区菜单排版 |
-| `webui/public/fonts/` | 自托管 Inter 可变字体与 SIL OFL 许可证 |
+| `webui/public/fonts/` | 自托管思源黑体简体中文可变字体与 SIL OFL 许可证 |
 
 ## 自动测试
 
@@ -67,7 +67,7 @@ node scripts/check_workbench.cjs
 
 可读性专项验收：运行 `node scripts/check_readability.cjs`。脚本仅接受 8012 端口的预置离线任务，检查 1440、1280、1080、390、360、900×600 和 720×450（1440×900 浏览器放大 200% 的等效 CSS 视口）。检查正文、输入与导航的实际字号，打开模型 / 权限 / Skill 菜单验证边界，滚动检查表单控件遮挡，并记录浏览器实际使用的字体。报告和截图保存在 `scratch/screenshots/readability-*`；同样纳入 CI。
 
-字体由 `webui/public/fonts/InterVariable.woff2` 提供，来源为 [Inter 官方仓库](https://github.com/rsms/inter)，其 SIL OFL 许可证随源码与发布包保留。中文依靠系统无衬线字体，不下载外部字体。新增静态资源后应运行发布包冒烟测试，确保 wheel 和源码包能完整提供字体、主题初始化脚本与页面资源：
+字体由 `webui/public/fonts/SourceHanSansSC-VF.woff2` 提供，来源为 [Adobe 思源黑体官方仓库](https://github.com/adobe-fonts/source-han-sans)，其 SIL OFL 许可证随源码与发布包保留。中英文均使用本地思源黑体，不请求外部字体服务；字体来源、版本和摘要见 [字体资源说明](../webui/public/fonts/README.md)。新增静态资源后应运行发布包冒烟测试，确保 wheel 和源码包能完整提供字体、主题初始化脚本与页面资源：
 
 ```powershell
 $env:JELLY_RUN_PACKAGE_SMOKE = '1'
